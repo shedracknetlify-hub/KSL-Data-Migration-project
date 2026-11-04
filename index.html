@@ -68,8 +68,21 @@ input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid v
 .msg.err{background:var(--bad-bg);color:var(--bad)}
 .msg.ok{background:var(--good-bg);color:var(--good)}
 .linkbtn{background:none;border:0;padding:4px 0;color:var(--brand);font-weight:600;cursor:pointer;text-decoration:underline;align-self:flex-start}
-.showpw{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--muted)}
-.showpw input{width:auto;min-height:0}
+.pwwrap{position:relative}
+.pwwrap input{padding-right:46px}
+.pweye{position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:0;padding:8px;cursor:pointer;color:var(--muted);display:flex;align-items:center;border-radius:6px}
+.pweye:hover{color:var(--ink)}
+.pweye svg{width:20px;height:20px}
+/* rejected keystroke / paste: red box + message under the box */
+input.inbad{box-shadow:0 0 0 2px var(--bad) inset;background:var(--bad-bg)}
+#inmsg{position:fixed;z-index:60;background:var(--bad);color:#fff;font-size:13px;line-height:1.35;padding:6px 10px;border-radius:6px;max-width:320px;box-shadow:0 4px 14px rgba(0,0,0,.2);pointer-events:none}
+/* OK / Cancel box (double entries) */
+.modalbg{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:70;display:flex;align-items:center;justify-content:center;padding:16px}
+.modal{background:#fff;border-radius:12px;max-width:560px;width:100%;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+.modal h3{margin:0 0 8px;color:var(--bad)}
+.modal .mbody{font-size:14px;max-height:50vh;overflow:auto}
+.modal .mbtns{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.datebar{background:var(--bad-bg);color:var(--bad);border-radius:8px;padding:10px 12px;font-size:14px;margin-bottom:12px}
 .pwrules{font-size:13px;color:var(--muted);margin:0;padding-left:18px}
 .pwrules li.ok{color:var(--good)}
 
@@ -207,7 +220,7 @@ if (window.KSL_TEST_CONFIG) Object.assign(CONFIG, window.KSL_TEST_CONFIG);
 // (or ...#error=…&error_description=… when the link has expired). Read them before supabase-js tidies the address.
 const AUTH_LINK = (() => {
   const h = new URLSearchParams(location.hash.slice(1)), q = new URLSearchParams(location.search), get = k => h.get(k) || q.get(k);
-  return { type: get('type'), error: get('error_description') || get('error'), errorCode: get('error_code') };
+  return { type: get('type'), token: !!(get('access_token') || get('code')), error: get('error_description') || get('error'), errorCode: get('error_code') };
 })();
 
 const sb = supabase.createClient(CONFIG.url, CONFIG.key, CONFIG.clientOptions || {});
@@ -235,13 +248,85 @@ function toast(text, kind = '') {
 }
 function fail(error, what) { console.error(what, error); toast(`${what}: ${error.message || error}`, 'err'); }
 
-/* ---------- minutes: accepts 45, 1:30, 1h30 ---------- */
+/* ---------- stoppage time: a plain number = minutes (45), or h:mm (1:30). Digits and one colon only;
+   the minutes after the colon must be two digits, 00–59. ---------- */
 function parseMinutes(v) {
-  v = String(v || '').trim().toLowerCase(); if (!v) return null;
-  let m = v.match(/^(\d+)\s*[:h]\s*(\d{1,2})\s*m?$/); if (m) return +m[1] * 60 + +m[2];
-  m = v.match(/^(\d+)\s*h$/); if (m) return +m[1] * 60;
-  m = v.match(/^(\d+)\s*m?$/); if (m) return +m[1];
+  v = String(v ?? '').trim(); if (!v) return null;
+  let m = v.match(/^(\d+)$/); if (m) return +m[1];
+  m = v.match(/^(\d+):([0-5]\d)$/); if (m) return +m[1] * 60 + +m[2];
   return NaN;
+}
+const MIN_RULE = 'Type minutes (e.g. 45) or h:mm (e.g. 1:30). Minutes after the colon: 00–59.';
+
+/* ---------- input guards: numbers-only boxes and stoppage-time boxes ----------
+   A keystroke or paste that would put a wrong character in the box is refused: the box goes red
+   and a message shows under it. Pasted thousands commas (1,250) are removed automatically. */
+const NUM_OK = v => /^\d*\.?\d*$/.test(v);                    // digits, at most one decimal point
+const MIN_OK = v => /^\d*(:([0-5]\d?)?)?$/.test(v);           // while typing: 45 · 1: · 1:3 · 1:30
+function flagInput(inp, msg) {
+  inp.classList.add('inbad'); clearTimeout(inp._badT);
+  inp._badT = setTimeout(() => inp.classList.remove('inbad'), 2500);
+  let b = $('#inmsg'); if (!b) { b = document.createElement('div'); b.id = 'inmsg'; document.body.appendChild(b); }
+  const r = inp.getBoundingClientRect();
+  b.textContent = msg; b.style.left = Math.max(8, Math.min(r.left, innerWidth - 330)) + 'px'; b.style.top = (r.bottom + 6) + 'px'; b.hidden = false;
+  clearTimeout(b._t); b._t = setTimeout(() => { b.hidden = true; }, 3000);
+}
+function cleanNumberText(v) { return String(v ?? '').trim().replace(/[,\s]/g, ''); }     // pasted 1,250 -> 1250
+function guardInput(inp, kind) {
+  if (inp._guard) return; inp._guard = kind;
+  const ok = kind === 'min' ? MIN_OK : NUM_OK;
+  const why = v => kind === 'min'
+    ? (/:\d*:/.test(v) || /:.*:/.test(v) ? 'Only one colon allowed. ' + MIN_RULE
+       : /:[6-9]/.test(v) || /:\d{3}/.test(v) ? 'Minutes after the colon must be 00–59.' : 'Stoppage time takes numbers and a colon only. ' + MIN_RULE)
+    : (/\..*\./.test(v) ? 'Only one decimal point allowed.' : 'Numbers only – letters and other characters are not accepted (a decimal point is fine).');
+  let last = inp.value;
+  inp.addEventListener('beforeinput', e => { if (e.inputType && e.inputType.startsWith('insertFrom')) inp._pasting = true; });
+  inp.addEventListener('input', () => {
+    let v = inp.value;
+    if (inp._pasting && kind === 'num') { const c = cleanNumberText(v); if (NUM_OK(c)) v = inp.value = c; }
+    if (inp._pasting && kind === 'min') v = inp.value = v.trim();
+    inp._pasting = false;
+    if (ok(v)) { last = v; inp.classList.remove('inbad'); return; }
+    const pos = Math.max(0, (inp.selectionStart || 0) - (v.length - last.length));
+    inp.value = last; try { inp.setSelectionRange(pos, pos); } catch (_) {}
+    flagInput(inp, why(v));
+  });
+  inp.addEventListener('focus', () => { last = inp.value; });
+}
+
+/* ---------- no entries for a shift that hasn't started ---------- */
+function shiftHasStarted(d, sh) {
+  const def = { Day: '07:30', Night: '18:30' };
+  const st = (S.m.shifts.find(s => s.code === sh)?.start_time || def[sh] || '00:00').slice(0, 5);
+  return Date.now() >= new Date(`${d}T${st}:00+03:00`).getTime();
+}
+function futureEntryError(d, sh) {         // '' if entries are allowed for this date and shift
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d || '')) return 'Choose a date first.';
+  if (shiftHasStarted(d, sh)) return '';
+  const st = (S.m.shifts.find(s => s.code === sh)?.start_time || (sh === 'Day' ? '07:30' : '18:30')).slice(0, 5);
+  return d > currentShift().date
+    ? `${niceDate(d)} is in the future. Output and stoppages can only be entered for shifts that have started.`
+    : `The ${niceDate(d)} ${sh} shift hasn't started yet (starts ${st}). Output and stoppages can only be entered for shifts that have started.`;
+}
+const kenyaToday = () => new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
+
+/* ---------- double entries ---------- */
+const nz = v => (v == null || v === '' || Number.isNaN(+v)) ? 0 : +v;
+const outKey = r => [r.machine_code, r.product_code || '', nz(r.qty), nz(r.sweet_scrap_kg), nz(r.material_scrap_kg)].join('|');
+const stopKey = r => [r.machine_code, r.reason_code, r.minutes].join('|');
+// OK / Cancel box. Resolves true when OK is pressed.
+function confirmBox(title, html, okText = 'OK, save anyway') {
+  return new Promise(res => {
+    const bg = document.createElement('div'); bg.className = 'modalbg';
+    bg.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${esc(title)}</h3><div class="mbody">${html}</div>
+      <div class="mbtns"><button class="btn" data-a="0">Cancel</button><button class="btn warn" data-a="1">${esc(okText)}</button></div></div>`;
+    document.body.appendChild(bg);
+    const done = v => { bg.remove(); document.removeEventListener('keydown', key); res(v); };
+    const key = e => { if (e.key === 'Escape') done(false); };
+    document.addEventListener('keydown', key);
+    $$('button', bg).forEach(b => b.onclick = () => done(b.dataset.a === '1'));
+    $('[data-a="0"]', bg).focus();
+  });
 }
 const hhmm = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
 
@@ -340,6 +425,21 @@ function ensureDatalists() {
 
 /* ---------- auth ---------- */
 const PW_MIN = 8;
+const EYE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-11-7-11-7a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 7 11 7a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+const pwInput = (id, ac) => `<div class="pwwrap"><input id="${id}" type="password" autocomplete="${ac}" required><button type="button" class="pweye" data-for="${id}" title="Show password" aria-label="Show password">${EYE}</button></div>`;
+function bindEyes(root = document) {
+  $$('.pweye', root).forEach(b => b.onclick = () => {
+    const i = $('#' + b.dataset.for), show = i.type === 'password';
+    i.type = show ? 'text' : 'password'; b.innerHTML = show ? EYE_OFF : EYE;
+    b.title = show ? 'Hide password' : 'Show password'; b.setAttribute('aria-label', b.title); i.focus();
+  });
+}
+// true if this login has no password yet (an invited person). Needs 12_invites.sql; null if not run.
+async function needsPassword() {
+  const { data, error } = await sb.rpc('my_needs_password');
+  return error ? null : data === true;
+}
 const clearAuthLink = () => { if (/access_token|error|type=/.test(location.hash + location.search) || location.href.endsWith('#')) history.replaceState(null, '', location.pathname); };
 function resetRedirect() {     // where the link in the reset email should open the app
   if (/^https?:$/.test(location.protocol)) return location.origin + location.pathname;
@@ -357,8 +457,13 @@ async function start() {
     return renderLogin(expired ? 'That email link has expired or has already been used. Use "Forgot your password?" to get a new one.' : AUTH_LINK.error);
   }
   if (!session) return renderLogin();
-  if (AUTH_LINK.type === 'recovery' || AUTH_LINK.type === 'invite' || S.recovery) {
-    const mode = AUTH_LINK.type === 'invite' ? 'invite' : 'reset';
+  // Invitation link: the person has no password yet, so they must choose one before going in.
+  // Recognised by the link type, by an invited user arriving through an emailed link, or by the
+  // database saying the login has no password (12_invites.sql).
+  const viaInvite = ['invite', 'signup', 'magiclink'].includes(AUTH_LINK.type)
+    || (AUTH_LINK.token && AUTH_LINK.type !== 'recovery' && session.user.invited_at);
+  if (AUTH_LINK.type === 'recovery' || S.recovery || viaInvite || await needsPassword()) {
+    const mode = AUTH_LINK.type === 'recovery' || S.recovery ? 'reset' : 'invite';
     clearAuthLink(); S.recovery = false;
     return renderSetPassword(session.user, mode);
   }
@@ -373,12 +478,13 @@ function renderLogin(message, info) {
     <div class="muted small">Output, scrap, stoppages and OEE</div>
     <form id="loginForm">
       <div class="field"><label for="em">Email</label><input id="em" type="email" autocomplete="username" required value="${esc(S.lastEmail || '')}"></div>
-      <div class="field"><label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password" required></div>
+      <div class="field"><label for="pw">Password</label>${pwInput('pw', 'current-password')}</div>
       <div id="loginMsg">${message ? `<div class="msg err">${esc(message)}</div>` : ''}${info ? `<div class="msg ok">${esc(info)}</div>` : ''}</div>
       <button class="btn primary" type="submit">Log in</button>
       <button class="linkbtn" type="button" id="forgot">Forgot your password?</button>
     </form>
   </div>`;
+  bindEyes();
   $('#forgot').onclick = () => { S.lastEmail = $('#em').value.trim(); renderForgot(); };
   $('#loginForm').onsubmit = async e => {
     e.preventDefault();
@@ -433,9 +539,8 @@ function renderSetPassword(user, mode) {
     <form id="spForm">
       <input type="email" autocomplete="username" value="${esc(user.email)}" hidden>
       <div class="field"><label>Logged in as</label><div><b>${esc(user.email)}</b></div></div>
-      <div class="field"><label for="np1">New password</label><input id="np1" type="password" autocomplete="new-password" required></div>
-      <div class="field"><label for="np2">Type it again</label><input id="np2" type="password" autocomplete="new-password" required></div>
-      <label class="showpw"><input type="checkbox" id="npShow"> Show password</label>
+      <div class="field"><label for="np1">New password</label>${pwInput('np1', 'new-password')}</div>
+      <div class="field"><label for="np2">Type it again</label>${pwInput('np2', 'new-password')}</div>
       <ul class="pwrules" id="npRules"><li data-r="len">At least ${PW_MIN} characters</li><li data-r="mix">Has a letter and a number</li><li data-r="same">Both boxes match</li></ul>
       <div id="spMsg"></div>
       <button class="btn primary" type="submit">Save password and continue</button>
@@ -446,7 +551,7 @@ function renderSetPassword(user, mode) {
   const checks = () => ({ len: a.value.length >= PW_MIN, mix: /[a-z]/i.test(a.value) && /\d/.test(a.value), same: a.value !== '' && a.value === b.value });
   const paint = () => { const c = checks(); $$('#npRules li').forEach(li => li.classList.toggle('ok', c[li.dataset.r])); };
   a.oninput = b.oninput = paint;
-  $('#npShow').onchange = e => { a.type = b.type = e.target.checked ? 'text' : 'password'; };
+  bindEyes();
   $('#spOut').onclick = () => sb.auth.signOut();
   $('#spForm').onsubmit = async e => {
     e.preventDefault();
@@ -475,6 +580,8 @@ async function afterLogin(user, opts = {}) {
   const { data, error } = await sb.from('profiles').select('*').eq('user_id', user.id).maybeSingle();
   if (error) return renderLogin('Could not read your profile: ' + error.message);
   S.profile = data;
+  // No password yet (invited person who got in some other way): choose one first. Needs 12_invites.sql.
+  if (!opts.passwordJustSet && await needsPassword()) return renderSetPassword(user, 'invite');
   // First log-in (or admin gave a temporary password): choose your own before going on. Needs 11_passwords.sql.
   if (data && data.active && data.password_set === false && !opts.passwordJustSet) return renderSetPassword(user, 'first');
   if (!data || data.role === 'pending' || !data.active) {
@@ -514,7 +621,7 @@ function ctxToolbar(opts = {}) {
   const secs = S.m.sections;
   if (!S.ctx.section || !secs.includes(S.ctx.section)) S.ctx.section = secs[0];
   return `<div class="toolbar">
-    <div class="field"><label for="cDate">Date</label><input id="cDate" type="date" value="${S.ctx.date}"></div>
+    <div class="field"><label for="cDate">Date</label><input id="cDate" type="date" value="${S.ctx.date}" ${opts.noFuture ? `max="${kenyaToday()}"` : ''}></div>
     <div class="field"><label for="cShift">Shift</label><select id="cShift">${(opts.shifts || S.m.shifts.map(s => s.code)).map(s => `<option ${s === (opts.shiftVal || S.ctx.shift) ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
     ${opts.noSection ? '' : `<div class="field"><label for="cSec">Section</label><select id="cSec">${opts.allSections ? `<option value="">All sections</option>` : ''}${secs.map(s => `<option ${s === (opts.secVal ?? S.ctx.section) ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>`}
     ${opts.extra || ''}
@@ -528,7 +635,7 @@ function bindCtx(onChange, opts = {}) {
 
 async function renderEntry() {
   $('#app').innerHTML = `<div class="hint">${esc(CONFIG.testHint)}. Pick a date, shift and section, then fill in each machine and press <b>Save</b>.</div>
-    ${ctxToolbar()}<div id="entryBody"><div class="muted">Loading…</div></div>`;
+    ${ctxToolbar({ noFuture: true })}<div id="entryBody"><div class="muted">Loading…</div></div>`;
   bindCtx(loadEntry);
   await loadEntry();
 }
@@ -551,7 +658,8 @@ async function loadEntry() {
   const active = machines.filter(x => P[x.code] || O[x.code] || T[x.code]);
   const others = machines.filter(x => !active.includes(x));
   S.entry = { P, O, T, opByMachine };
-  body.innerHTML = `
+  const fut = futureEntryError(date, shift);
+  body.innerHTML = `${fut ? `<div class="datebar">${esc(fut)}</div>` : ''}
     ${active.length ? '' : `<div class="panel muted">Nothing planned or entered for ${esc(section)} on ${esc(date)} ${esc(shift)} shift. Add a machine below.</div>`}
     <div class="cards" id="cards">${active.map(machineCard).join('')}</div>
     ${others.length ? `<div class="toolbar" style="margin-top:14px">
@@ -602,11 +710,12 @@ function machineCard(mc) {
 }
 function stopRowHTML() {
   return `<div class="stoprow"><select class="s-r">${S.m.reasons.map(r => `<option value="${r.code}">${esc(r.name)}</option>`).join('')}</select>
-    <input class="s-m" placeholder="min or h:mm" inputmode="numeric"><button class="x" type="button" title="Remove">×</button></div>`;
+    <input class="s-m" placeholder="min or h:mm" inputmode="text" autocomplete="off"><button class="x" type="button" title="Remove">×</button></div>`;
 }
 function bindCard(card) {
   const mc = S.m.machineBy[card.dataset.m];
-  $('.f-addstop', card).onclick = () => { $('.stops', card).insertAdjacentHTML('beforeend', stopRowHTML()); const r = $('.stops', card).lastElementChild; $('.x', r).onclick = () => r.remove(); $('.s-m', r).focus(); };
+  ['.f-qty', '.f-ss', '.f-ms'].forEach(c => guardInput($(c, card), 'num'));
+  $('.f-addstop', card).onclick = () => { $('.stops', card).insertAdjacentHTML('beforeend', stopRowHTML()); const r = $('.stops', card).lastElementChild; $('.x', r).onclick = () => r.remove(); guardInput($('.s-m', r), 'min'); $('.s-m', r).focus(); };
   $$('[data-del]', card).forEach(b => b.onclick = async () => {
     if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Delete?'; b.style.fontSize = '12px'; setTimeout(() => { b.dataset.confirm = ''; b.textContent = '×'; b.style.fontSize = ''; }, 3000); return; }
     const { error } = await sb.from(b.dataset.del).delete().eq('id', b.dataset.id);
@@ -619,13 +728,14 @@ function bindCard(card) {
     const prod = $('.f-prod', card) ? productFromLabel($('.f-prod', card).value) : null, op = empFromLabel($('.f-op', card).value);
     const stops = $$('.stoprow', card).map(r => ({ reason_code: $('.s-r', r).value, minutes: parseMinutes($('.s-m', r).value), el: r }));
     const errs = [];
+    const fut = futureEntryError(S.ctx.date, S.ctx.shift); if (fut) errs.push(fut);
     if (qty === null && (ss || ms)) errs.push('Enter the output as well as the scrap.');
     if ([qty, ss, ms].some(v => Number.isNaN(v) || v < 0)) errs.push('Output and scrap must be numbers (0 or more).');
     if (qty !== null && prod === undefined) errs.push('Product not recognised – pick it from the list.');
     if (qty !== null && !prod && needsProduct(mc)) errs.push('Choose the product.');
     if (qty !== null && prod) { const se = productStageError(mc, prod); if (se) errs.push(se); }
     if (op === undefined) errs.push('Operator not recognised – pick from the list or leave blank.');
-    for (const s of stops) if (s.minutes === null || Number.isNaN(s.minutes) || s.minutes <= 0 || s.minutes > 780) errs.push('Stoppage minutes must be between 1 and 780 (e.g. 45 or 1:30).');
+    for (const s of stops) if (s.minutes === null || Number.isNaN(s.minutes) || s.minutes <= 0 || s.minutes > 780) errs.push('Stoppage time must be between 1 minute and 13:00. ' + MIN_RULE);
     if (qty === null && !stops.length) errs.push('Nothing to save – enter output or a stoppage.');
     if (errs.length) { warn.innerHTML = [...new Set(errs)].join('<br>'); warn.classList.remove('hidden'); return; }
     // soft warnings (save anyway on second press)
@@ -640,6 +750,17 @@ function bindCard(card) {
       const shiftMin = (S.m.shifts.find(s => s.code === S.ctx.shift)?.hours || 13) * 60;
       if (totalStop > shiftMin) w.push(`Stoppages add up to ${hhmm(totalStop)} – longer than the shift.`);
       if (w.length) { warn.innerHTML = w.join('<br>'); warn.classList.remove('hidden'); btn.dataset.force = '1'; btn.textContent = 'Save anyway'; btn.classList.replace('primary', 'warn'); return; }
+    }
+    // double entries: same output already saved for this date + shift, or a stoppage row the same as the one above it
+    { const dup = [];
+      if (qty !== null) {
+        const k = outKey({ machine_code: mc.code, product_code: prod, qty, sweet_scrap_kg: ss, material_scrap_kg: ms });
+        const n = (S.entry.O[mc.code] || []).filter(o => outKey(o) === k).length;
+        if (n) dup.push(`This output (${fmt(qty, 2)} ${esc(mc.unit || '')}${prod ? ' of ' + esc(S.m.productBy[prod]?.description || prod) : ''}, sweet scrap ${fmt(nz(ss), 2)}, material scrap ${fmt(nz(ms), 2)}) is already saved for ${esc(mc.name)} on this date and shift${n > 1 ? ` (${n} times)` : ''}.`);
+      }
+      stops.forEach((x, i) => { if (i && stopKey({ ...x, machine_code: 1 }) === stopKey({ ...stops[i - 1], machine_code: 1 }))
+        dup.push(`Stoppage ${i + 1} (${esc(S.m.reasonBy[x.reason_code]?.name)} ${hhmm(x.minutes)}) is the same as stoppage ${i}.`); });
+      if (dup.length && !await confirmBox('Possible double entry', dup.map(d => `<p>${d}</p>`).join('') + '<p>Press <b>Cancel</b> to check it, or <b>OK, save anyway</b> if it really happened twice.</p>')) return;
     }
     btn.disabled = true; btn.textContent = 'Saving…';
     const base = { shift: S.ctx.shift, machine_code: mc.code };
@@ -667,7 +788,7 @@ const GRIDS = {
       { k: 'ms', l: 'Material scrap kg', w: 120, n: 1 }, { k: 'op', l: 'Operator', w: 240, list: 'dl-employees' }, { k: 'cm', l: 'Comments', w: 200 }] },
   stops: { table: 'stoppages', title: 'Stoppages', cols: [
       { k: 'machine', l: 'Machine', w: 220, list: 'dl-machines', req: 1 }, { k: 'reason', l: 'Reason', w: 200, list: 'dl-reasons', req: 1 },
-      { k: 'min', l: 'Minutes (or h:mm)', w: 130, req: 1 }, { k: 'cm', l: 'Comments', w: 260 }] },
+      { k: 'min', l: 'Minutes or h:mm', w: 130, req: 1, t: 1 }, { k: 'cm', l: 'Comments', w: 260 }] },
 };
 let bulkTab = 'output';
 const niceDate = d => new Date(d + 'T00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
@@ -676,8 +797,8 @@ function renderBulk() {
       <b>Tab</b>/<b>Enter</b> moves between cells. You can paste straight from Excel (columns in the same order as the grid, starting with Machine).
       The product list only shows products for the machine's section. Rows with problems turn red and are listed above the grid. * = required.</div>
     <div class="tabs"><button data-t="output">Output &amp; scrap</button><button data-t="stops">Stoppages</button></div>
-    ${ctxToolbar({ noSection: true, extra: `<button class="btn primary" id="gSave">Save rows</button><button class="btn" id="gAdd">+ 10 rows</button><button class="btn ghost" id="gClear">Clear unsaved</button>` })}
-    <div class="muted small" id="gInfo" style="margin:-4px 0 10px;min-height:1.2em"></div><div id="gErrs" class="gerrs hidden"></div>
+    ${ctxToolbar({ noSection: true, noFuture: true, extra: `<button class="btn primary" id="gSave">Save rows</button><button class="btn" id="gAdd">+ 10 rows</button><button class="btn ghost" id="gClear">Clear unsaved</button>` })}
+    <div id="gFuture"></div><div class="muted small" id="gInfo" style="margin:-4px 0 10px;min-height:1.2em"></div><div id="gErrs" class="gerrs hidden"></div>
     <div class="tablewrap" style="max-height:62vh"><table class="gridtbl" id="grid"></table></div>
     <h3 style="margin:22px 0 10px" id="gExTitle"></h3>
     <div id="gExisting"></div>`;
@@ -693,6 +814,8 @@ function renderBulk() {
 function bulkLabels() {
   const t = `${niceDate(S.ctx.date)} · ${S.ctx.shift} shift`;
   $('#gSave').textContent = `Save rows to ${t}`;
+  const fut = futureEntryError(S.ctx.date, S.ctx.shift);
+  $('#gFuture').innerHTML = fut ? `<div class="datebar">${esc(fut)}</div>` : '';
   $('#gExTitle').textContent = `Already in the database for ${t}`;
 }
 function buildGrid(n) {
@@ -710,6 +833,7 @@ function addGridRows(n) {
     inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const nx = $('#grid tbody').children[r + 1]; if (nx) $$('input', nx)[c].focus(); } };
     inp.onpaste = e => onGridPaste(e, r, c);
     inp.onchange = () => { if (inp.closest('td').dataset.k === 'machine') onMachineCell(tr); };
+    const col = g.cols[c]; if (col.n) guardInput(inp, 'num'); else if (col.t) guardInput(inp, 'min');
   }));
 }
 // machine chosen -> show its unit and narrow the product list to its section
@@ -732,18 +856,34 @@ function onGridPaste(e, r0, c0) {
     return;
   }
   const tb = $('#grid tbody'); const need = r0 + lines.length - tb.children.length; if (need > 0) addGridRows(need);
-  const editable = c => !cols[c].ro;
+  const editable = c => !cols[c].ro, refused = [];
   lines.forEach((cells, i) => { const tr = tb.children[r0 + i]; const inputs = $$('input', tr); let c = c0;
-    cells.forEach(v => { while (c < inputs.length && !editable(c)) c++; if (c < inputs.length) inputs[c++].value = v.trim(); });
+    cells.forEach(v => { while (c < inputs.length && !editable(c)) c++; if (c >= inputs.length) return;
+      const col = cols[c], td = inputs[c].closest('td'); v = v.trim();
+      if (col.n) v = cleanNumberText(v);                                   // 1,250 -> 1250
+      const bad = v && ((col.n && !NUM_OK(v)) || (col.t && Number.isNaN(parseMinutes(v))));
+      if (bad) { refused.push(`<b>Row ${tr.rowIndex}</b> ${esc(col.l)}: "${esc(v)}" ${col.n ? 'is not a number' : 'is not minutes or h:mm (00–59)'}`);
+        inputs[c].value = ''; td.classList.add('bad'); td.title = 'Not pasted: ' + v; }
+      else { inputs[c].value = v; td.classList.remove('bad'); td.title = ''; }
+      c++; });
     if ($('[data-k=machine] input', tr)) onMachineCell(tr); });
-  $('#gInfo').textContent = `Pasted ${lines.length} rows`;
+  $('#gInfo').textContent = `Pasted ${lines.length} rows` + (refused.length ? ` – ${refused.length} cell(s) refused (left blank, shown red)` : '');
+  $('#gErrs').innerHTML = refused.length ? 'Not pasted – only numbers are accepted in these cells:<br>' + refused.join('<br>') : '';
+  $('#gErrs').classList.toggle('hidden', !refused.length);
 }
 async function saveGrid() {
   const g = GRIDS[bulkTab], rows = [], trs = [], problems = [];
   const { date, shift } = S.ctx;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) { $('#gInfo').textContent = 'Choose a date at the top first.'; return; }
+  { const fut = futureEntryError(date, shift); if (fut) { $('#gInfo').innerHTML = `<span style="color:var(--bad)">${esc(fut)} Nothing saved.</span>`; return; } }
+  const prevStop = [];      // stoppages: every filled row in grid order (to compare a row with the one above it)
   for (const tr of $$('#grid tbody tr')) {
-    if (tr.classList.contains('saved')) continue;
+    if (tr.classList.contains('saved')) {
+      if (bulkTab === 'stops') { const v = Object.fromEntries($$('td[data-k]', tr).map(td => [td.dataset.k, $('input', td).value.trim()]));
+        const reason = S.m.reasons.find(r => r.name.toUpperCase() === v.reason.toUpperCase() || r.code === v.reason.toUpperCase());
+        prevStop.push({ rec: { machine_code: machineFromLabel(v.machine), reason_code: reason?.code, minutes: parseMinutes(v.min) }, row: tr.rowIndex, saved: true }); }
+      continue;
+    }
     const v = Object.fromEntries($$('td[data-k]', tr).map(td => [td.dataset.k, $('input', td).value.trim()]));
     const filled = Object.entries(v).filter(([k, x]) => x && k !== 'unit');
     $$('td', tr).forEach(td => { td.classList.remove('bad'); td.title = ''; }); tr.classList.remove('err'); tr.title = '';
@@ -769,8 +909,9 @@ async function saveGrid() {
       const mins = parseMinutes(v.min);
       if (!v.reason) mark('reason', 'Reason is required'); else if (!reason) mark('reason', 'Reason not recognised – pick it from the list');
       if (!v.min) mark('min', 'Minutes are required');
-      else if (!mins || Number.isNaN(mins) || mins > 780) mark('min', 'Minutes must be 1–780 (e.g. 45 or 1:30)');
+      else if (!mins || Number.isNaN(mins) || mins > 780) mark('min', 'Stoppage time must be 1 minute to 13:00. ' + MIN_RULE);
       rec = { stop_date: date, shift, machine_code: mcode, reason_code: reason?.code, minutes: mins, comments: v.cm || null };
+      prevStop.push({ rec, row: tr.rowIndex, saved: false });
     }
     if (bad.length) { tr.classList.add('err'); tr.title = 'Check the red cells';
       problems.push(`<b>Row ${tr.rowIndex}:</b> ` + bad.map(k => esc($(`[data-k=${k}]`, tr).title)).join(' · ')); continue; }
@@ -779,6 +920,24 @@ async function saveGrid() {
   $('#gErrs').innerHTML = problems.join('<br>'); $('#gErrs').classList.toggle('hidden', !problems.length);
   const errCount = $$('#grid tbody tr.err').length;
   if (!rows.length) { $('#gInfo').textContent = errCount ? `${errCount} row(s) need fixing – nothing saved.` : 'No rows to save.'; return; }
+  // double entries
+  const dup = [], rowNo = tr => tr.rowIndex;
+  if (bulkTab === 'output') {
+    const { data: ex, error: exErr } = await sb.from('output_entries').select('machine_code,product_code,qty,sweet_scrap_kg,material_scrap_kg').eq('prod_date', date).eq('shift', shift).limit(5000);
+    if (exErr) return fail(exErr, 'Checking for double entries');
+    const saved = {}; ex.forEach(r => { const k = outKey(r); saved[k] = (saved[k] || 0) + 1; });
+    const seen = {};
+    rows.forEach((r, i) => { const k = outKey(r), mn = S.m.machineBy[r.machine_code]?.name || r.machine_code;
+      const what = `${esc(mn)} · ${esc(S.m.productBy[r.product_code]?.description || r.product_code || '')} · ${fmt(r.qty, 2)}`;
+      if (seen[k]) dup.push(`<b>Row ${rowNo(trs[i])}</b> is the same as row ${seen[k]} (${what}).`);
+      else if (saved[k]) dup.push(`<b>Row ${rowNo(trs[i])}</b> (${what}) is already saved for this date and shift.`);
+      seen[k] ||= rowNo(trs[i]); });
+  } else {
+    prevStop.forEach((x, i) => { if (!i || x.saved) return; const p = prevStop[i - 1];
+      if (stopKey(x.rec) === stopKey(p.rec)) dup.push(`<b>Row ${x.row}</b> is the same as row ${p.row} (${esc(S.m.machineBy[x.rec.machine_code]?.name || '')} · ${esc(S.m.reasonBy[x.rec.reason_code]?.name)} · ${hhmm(x.rec.minutes)}).`); });
+  }
+  if (dup.length && !await confirmBox('Possible double entry', dup.map(d => `<p style="margin:4px 0">${d}</p>`).join('') + '<p>Press <b>Cancel</b> to check the rows, or <b>OK, save anyway</b> to save all rows as they are.</p>')) {
+    $('#gInfo').textContent = 'Not saved – check the possible double entries.'; return; }
   $('#gSave').disabled = true;
   const { error } = await sb.from(g.table).insert(rows);
   $('#gSave').disabled = false;
