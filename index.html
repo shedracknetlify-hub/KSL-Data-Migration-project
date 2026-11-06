@@ -947,6 +947,16 @@ async function saveGrid() {
   toast(`Saved ${rows.length} row(s)`, 'ok');
   loadExisting();
 }
+// names of the people who entered rows (admin can read all profiles; others only their own)
+async function loadUserNames(ids) {
+  S.userNames ||= {};
+  const need = [...new Set(ids.filter(id => id && !(id in S.userNames)))];
+  if (!need.length) return;
+  const { data, error } = await sb.from('profiles').select('user_id,full_name,email').in('user_id', need);
+  if (error) { console.error('Loading user names', error); return; }
+  for (const p of data) S.userNames[p.user_id] = (p.full_name && p.full_name.trim()) || p.email || 'unknown user';
+}
+const kenyaStamp = t => t ? new Date(t).toLocaleString('en-GB', { timeZone: 'Africa/Nairobi', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
 async function loadExisting() {
   const box = $('#gExisting'); if (!box) return;
   const { date, shift } = S.ctx;
@@ -958,12 +968,17 @@ async function loadExisting() {
   const mn = c => S.m.machineBy[c]?.name || c;
   const delBtn = r => canEditEntry(r) ? `<button class="x" data-id="${r.id}" title="Delete">×</button>` : `<span class="muted small" title="Entered by someone else – you can't change it">locked</span>`;
   const nEdit = data.filter(canEditEntry).length;
+  // admin only: who entered each row and when (Kenya time)
+  const admin = S.profile?.role === 'admin';
+  if (admin) await loadUserNames(data.map(r => r.entered_by));
+  const whoTH = admin ? '<th>Entered by</th><th>Entered at</th>' : '';
+  const whoTD = r => admin ? `<td class="small">${r.entered_by ? esc(S.userNames[r.entered_by] || 'unknown user') : '<span class="muted">– (imported)</span>'}</td><td class="small" style="white-space:nowrap">${esc(kenyaStamp(r.entered_at))}</td>` : '';
   box.innerHTML = `<div class="tablewrap" style="max-height:50vh"><table><thead><tr>${bulkTab === 'output'
-      ? '<th>Machine</th><th>Product</th><th class="n">Output</th><th>Unit</th><th class="n">Kg</th><th class="n">Sweet scrap</th><th class="n">Material scrap</th><th>Operator</th><th>Source</th><th></th>'
-      : '<th>Machine</th><th>Reason</th><th class="n">Minutes</th><th class="n">h:mm</th><th>Comments</th><th>Source</th><th></th>'}</tr></thead><tbody>
+      ? '<th>Machine</th><th>Product</th><th class="n">Output</th><th>Unit</th><th class="n">Kg</th><th class="n">Sweet scrap</th><th class="n">Material scrap</th><th>Operator</th><th>Source</th>' + whoTH + '<th></th>'
+      : '<th>Machine</th><th>Reason</th><th class="n">Minutes</th><th class="n">h:mm</th><th>Comments</th><th>Source</th>' + whoTH + '<th></th>'}</tr></thead><tbody>
     ${data.map(r => bulkTab === 'output'
-      ? `<tr><td>${esc(mn(r.machine_code))}</td><td>${esc(S.m.productBy[r.product_code]?.description || '')}</td><td class="n">${fmt(r.qty, 1)}</td><td>${esc(r.unit)}</td><td class="n">${fmt(r.output_kg, 1)}</td><td class="n">${fmt(r.sweet_scrap_kg, 2)}</td><td class="n">${fmt(r.material_scrap_kg, 2)}</td><td>${esc(S.m.empBy[r.operator_id]?.name || '')}</td><td class="muted small">${esc(r.source)}</td><td>${delBtn(r)}</td></tr>`
-      : `<tr><td>${esc(mn(r.machine_code))}</td><td>${esc(S.m.reasonBy[r.reason_code]?.name)}</td><td class="n">${r.minutes}</td><td class="n">${hhmm(r.minutes)}</td><td>${esc(r.comments || '')}</td><td class="muted small">${esc(r.source)}</td><td>${delBtn(r)}</td></tr>`).join('')}
+      ? `<tr><td>${esc(mn(r.machine_code))}</td><td>${esc(S.m.productBy[r.product_code]?.description || '')}</td><td class="n">${fmt(r.qty, 1)}</td><td>${esc(r.unit)}</td><td class="n">${fmt(r.output_kg, 1)}</td><td class="n">${fmt(r.sweet_scrap_kg, 2)}</td><td class="n">${fmt(r.material_scrap_kg, 2)}</td><td>${esc(S.m.empBy[r.operator_id]?.name || '')}</td><td class="muted small">${esc(r.source)}</td>${whoTD(r)}<td>${delBtn(r)}</td></tr>`
+      : `<tr><td>${esc(mn(r.machine_code))}</td><td>${esc(S.m.reasonBy[r.reason_code]?.name)}</td><td class="n">${r.minutes}</td><td class="n">${hhmm(r.minutes)}</td><td>${esc(r.comments || '')}</td><td class="muted small">${esc(r.source)}</td>${whoTD(r)}<td>${delBtn(r)}</td></tr>`).join('')}
     </tbody></table></div><div class="muted small" style="margin-top:6px">${data.length} row(s). Press × twice to delete a row.${nEdit < data.length ? ` Rows marked <b>locked</b> were entered by someone else and can't be changed from your login.` : ''}</div>`;
   $$('button.x', box).forEach(b => b.onclick = async () => {
     if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Delete?'; b.style.fontSize = '12px'; setTimeout(() => { b.dataset.confirm = ''; b.textContent = '×'; b.style.fontSize = ''; }, 3000); return; }
@@ -1275,12 +1290,20 @@ let stFrom = null, stTo = null, stSec = '';
 async function renderStops() {
   if (!stFrom) { stTo = S.ctx.date; const d = new Date(S.ctx.date + 'T00:00'); d.setDate(d.getDate() - 6); stFrom = d.toISOString().slice(0, 10); }
   $('#app').innerHTML = `<div class="toolbar">
-      <div class="field"><label for="sFrom">From</label><input id="sFrom" type="date" value="${stFrom}"></div>
-      <div class="field"><label for="sTo">To</label><input id="sTo" type="date" value="${stTo}"></div>
+      <div class="field"><label for="sFrom">From</label><input id="sFrom" type="date" value="${stFrom}" max="${stTo}"></div>
+      <div class="field"><label for="sTo">To</label><input id="sTo" type="date" value="${stTo}" min="${stFrom}"></div>
       <div class="field"><label for="sSec">Section</label><select id="sSec"><option value="">All sections</option>${S.m.sections.map(s => `<option ${s === stSec ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>
     </div><div id="stBody"><div class="muted">Loading…</div></div>`;
-  $('#sFrom').onchange = e => { stFrom = e.target.value; loadStops(); };
-  $('#sTo').onchange = e => { stTo = e.target.value; loadStops(); };
+  // To must be the same day as From or later; a wrong or blank date is refused and the old one put back
+  const setRange = (inp, which) => {
+    const v = inp.value, from = which === 'from' ? v : stFrom, to = which === 'to' ? v : stTo;
+    if (!v) { inp.value = which === 'from' ? stFrom : stTo; return flagInput(inp, 'Pick a date.'); }
+    if (to < from) { inp.value = which === 'from' ? stFrom : stTo; return flagInput(inp, which === 'from' ? 'From date cannot be after the To date.' : 'To date must be the same as or after the From date.'); }
+    if (from === stFrom && to === stTo) return;
+    stFrom = from; stTo = to; $('#sFrom').max = stTo; $('#sTo').min = stFrom; loadStops();
+  };
+  $('#sFrom').onchange = e => setRange(e.target, 'from');
+  $('#sTo').onchange = e => setRange(e.target, 'to');
   $('#sSec').onchange = e => { stSec = e.target.value; loadStops(); };
   loadStops();
 }
@@ -1432,6 +1455,7 @@ function addPlanRow(sec) {
 function bindPlanRow(tr) {
   const r = PL.rows.find(x => x.key === +tr.dataset.key);
   const sel = $('[data-k=machine] select', tr), pin = $('[data-k=product] input', tr), hin = $('[data-k=hrs] input', tr), cin = $('[data-k=co] input', tr), oin = $('[data-k=out] input', tr);
+  [hin, cin, oin].forEach(el => guardInput(el, 'num'));     // digits and one decimal point only
   const touch = () => { PL.dirty = true; $$('td', tr).forEach(td => { td.classList.remove('bad'); td.title = ''; }); };
   const autoOut = () => {   // keep the template default in Planned output until the planner types their own figure
     if (!r.auto) return;
