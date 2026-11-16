@@ -157,7 +157,29 @@ table.oee .pplan{color:var(--muted);font-size:11.5px;font-variant-numeric:tabula
 .plantbl td.n,.plantbl td.u{padding:6px 9px;color:var(--muted)}
 .plantbl td.e{color:var(--ink);font-weight:600}
 .plantbl td.ro{padding:7px 9px}
-.plantbl td.ua.neg{color:var(--bad);font-weight:700;background:var(--bad-bg)}
+#spTable tr.secstart td{border-top:2px solid var(--line)}
+.plantbl td.ua .sub.neg{color:var(--bad);font-weight:700;background:var(--bad-bg)}
+.plantbl td.e .sub,.plantbl td.ua .sub{min-height:22px}
+.plantbl tr.multi td.e,.plantbl tr.multi td.ua{padding:0 9px}
+.plantbl tr.multi td.e .sub,.plantbl tr.multi td.ua .sub{height:34px;line-height:34px;margin:0 -9px;padding:0 9px}
+.plantbl tr.multi td.e .sub + .sub,.plantbl tr.multi td.ua .sub + .sub{border-top:1px dashed var(--line2)}
+.plantbl .mf{display:flex;align-items:center;position:relative}
+.plantbl .mf + .mf{border-top:1px dashed var(--line2)}
+.plantbl .mf input{flex:1;min-width:0}
+.plantbl .mf .ml{flex:none;width:72px;padding-left:9px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+.plantbl tr.multi td.ro .mf{min-height:34px}
+.plantbl .mf .ml.ng{width:auto;padding-right:8px;color:var(--warn,#9a6700)}
+.plantbl tr.multi td.ro{padding-top:0;padding-bottom:0}
+.plantbl .mf.bad{box-shadow:inset 0 0 0 2px var(--bad)}
+.plantbl .mf.bad input{color:var(--bad);font-weight:600}
+.plantbl .fillsel{background:#e8f0ff !important;box-shadow:inset 0 0 0 1px var(--focus)}
+.plantbl td.bad{box-shadow:inset 0 0 0 2px var(--bad)}
+.cbox{position:absolute;z-index:60;background:#fff;border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);max-height:300px;overflow:auto;font-size:14px;padding:4px 0}
+.cbox div{padding:7px 12px;cursor:pointer;white-space:nowrap}
+.cbox div.on,.cbox div:hover{background:#eef3ff}
+.cbox div small{color:var(--muted);margin-left:8px}
+.cbox .none{color:var(--muted);cursor:default;background:none !important}
+.fillh{position:absolute;z-index:65;width:9px;height:9px;background:var(--focus);border:1px solid #fff;cursor:crosshair;display:none;touch-action:none}
 .plantbl td select{border:0;border-radius:0;min-height:34px;padding:6px 8px;background:transparent}
 .plantbl td input.auto{color:var(--muted);font-style:italic}
 .plantbl td[data-k=hrs] input,.plantbl td[data-k=co] input,.plantbl td[data-k=out] input{text-align:right;padding-right:16px}
@@ -240,7 +262,10 @@ function currentShift() {
   const y = new Date(k); y.setUTCDate(y.getUTCDate() - 1); return { date: y.toISOString().slice(0, 10), shift: 'Night' };
 }
 
-const S = { user: null, profile: null, m: null, view: null, ctx: { date: null, shift: null, section: null } };
+const S = { user: null, profile: null, m: null, view: null, ctx: { date: null, shift: null, section: null }, drafts: {}, leave: null };
+// Unsaved values typed on a screen are kept (in memory only) when moving to another screen and back.
+// They are lost when the app is refreshed or closed, and cleared at log out.
+function clearDrafts() { S.drafts = {}; S.leave = null; if (typeof PL !== 'undefined') { PL.dirty = false; PL.rows = []; PL.date = null; } }
 
 function toast(text, kind = '') {
   const t = document.createElement('div'); t.className = 'toast ' + kind; t.textContent = text;
@@ -331,7 +356,7 @@ function confirmBox(title, html, okText = 'OK, save anyway') {
 const hhmm = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
 
 /* ---------- roles ---------- */
-//   clerk        – Bulk entry only; corrects own entries and Mobile data clerks' entries
+//   clerk        – Bulk entry + SAP summary; corrects own entries and Mobile data clerks' entries
 //   mobile_clerk – Bulk entry only; corrects own entries only
 //   supervisor   – Shift supervisor: Planning (full), OEE (view); no output/stoppage entry
 //   manager      – OEE and Planning, view only
@@ -344,6 +369,8 @@ const CAN = {
   plan: r => ['supervisor', 'planner', 'admin'].includes(r),
   oee: r => ['supervisor', 'planner', 'manager', 'admin'].includes(r),
   stops: r => ['planner', 'admin'].includes(r),
+  stores: r => ['supervisor', 'planner', 'admin'].includes(r),
+  sap: r => ['clerk', 'admin'].includes(r),
   users: r => r === 'admin',
 };
 const ROLE_LABEL = { pending: 'Pending (no access)', supervisor: 'Shift supervisor', clerk: 'Clerk', mobile_clerk: 'Mobile data clerk',
@@ -351,7 +378,9 @@ const ROLE_LABEL = { pending: 'Pending (no access)', supervisor: 'Shift supervis
 const VIEWS = [
   { id: 'entry', label: 'Shift entry', can: CAN.entry, render: renderEntry },
   { id: 'bulk', label: 'Bulk entry', can: CAN.bulk, render: renderBulk },
+  { id: 'sap', label: 'SAP summary', can: CAN.sap, render: renderSap },
   { id: 'plan', label: 'Planning', can: CAN.planView, render: renderPlan },
+  { id: 'stores', label: 'Stores issue', can: CAN.stores, render: renderStores },
   { id: 'oee', label: 'OEE', can: CAN.oee, render: renderOEE },
   { id: 'stops', label: 'Stoppages', can: CAN.stops, render: renderStops },
   { id: 'users', label: 'Users', can: CAN.users, render: renderUsers },
@@ -447,7 +476,7 @@ function resetRedirect() {     // where the link in the reset email should open 
 }
 async function start() {
   sb.auth.onAuthStateChange((ev, session) => {
-    if (ev === 'SIGNED_OUT') renderLogin();
+    if (ev === 'SIGNED_OUT') { clearDrafts(); renderLogin(); }
     if (ev === 'PASSWORD_RECOVERY') S.recovery = true;
   });
   const { data: { session } } = await sb.auth.getSession();
@@ -609,6 +638,7 @@ function route() {
   let id = location.hash.slice(1);
   if (!allowed.find(v => v.id === id)) id = allowed[0].id;
   $('#nav').innerHTML = allowed.map(v => `<a href="#${v.id}" class="${v.id === id ? 'active' : ''}">${v.label}</a>`).join('');
+  if (S.leave) { const f = S.leave; S.leave = null; try { f(); } catch (e) { console.error('Keeping unsaved values', e); } }
   S.view = id;
   if (!S.ctx.date) { const c = currentShift(); S.ctx.date = c.date; S.ctx.shift = c.shift; }
   allowed.find(v => v.id === id).render();
@@ -634,10 +664,41 @@ function bindCtx(onChange, opts = {}) {
 }
 
 async function renderEntry() {
+  S.leave = () => entrySnapshot();
   $('#app').innerHTML = `<div class="hint">${esc(CONFIG.testHint)}. Pick a date, shift and section, then fill in each machine and press <b>Save</b>.</div>
     ${ctxToolbar({ noFuture: true })}<div id="entryBody"><div class="muted">Loading…</div></div>`;
-  bindCtx(loadEntry);
+  bindCtx(() => { entrySnapshot(); loadEntry(); });
   await loadEntry();
+}
+// keep what was typed on the machine cards (per date + shift + section) until it is saved
+const entryKey = () => `${S.ctx.date}|${S.ctx.shift}|${S.ctx.section}`;
+function entrySnapshot(skip) {
+  const cards = $$('#cards .card'); if (!S.entryKey || !cards.length) return;
+  const d = {};
+  for (const c of cards) {
+    if (c.dataset.m === skip) continue;
+    const v = k => $(k, c)?.value ?? null;
+    const x = { prod: v('.f-prod'), qty: v('.f-qty'), ss: v('.f-ss'), ms: v('.f-ms'), op: v('.f-op'), cm: v('.f-cm'),
+      stops: $$('.stoprow', c).map(r => ({ r: $('.s-r', r).value, m: $('.s-m', r).value })), touched: c.dataset.touched === '1' };
+    if (x.touched || x.qty || x.ss || x.ms || x.cm || x.stops.length) d[c.dataset.m] = x;
+  }
+  S.drafts['entry|' + S.entryKey] = Object.keys(d).length ? d : null;
+}
+function entryRestore() {
+  const k = 'entry|' + S.entryKey, d = S.drafts[k]; if (!d) return 0;
+  S.drafts[k] = null;
+  let n = 0;
+  for (const [code, x] of Object.entries(d)) {
+    let card = $(`#cards .card[data-m="${CSS.escape(code)}"]`);
+    if (!card) { const mc = S.m.machineBy[code]; if (!mc) continue;
+      $('#cards').insertAdjacentHTML('beforeend', machineCard(mc)); card = $('#cards').lastElementChild; bindCard(card);
+      $(`#addM option[value="${CSS.escape(code)}"]`)?.remove(); }
+    const set = (sel, v) => { const el = $(sel, card); if (el && v != null) el.value = v; };
+    set('.f-prod', x.prod); set('.f-qty', x.qty); set('.f-ss', x.ss); set('.f-ms', x.ms); set('.f-op', x.op); set('.f-cm', x.cm);
+    for (const st of x.stops) { $('.f-addstop', card).click(); const r = $('.stops', card).lastElementChild; $('.s-r', r).value = st.r; $('.s-m', r).value = st.m; }
+    card.dataset.touched = '1'; n++;
+  }
+  return n;
 }
 async function loadEntry() {
   const { date, shift, section } = S.ctx;
@@ -659,7 +720,8 @@ async function loadEntry() {
   const others = machines.filter(x => !active.includes(x));
   S.entry = { P, O, T, opByMachine };
   const fut = futureEntryError(date, shift);
-  body.innerHTML = `${fut ? `<div class="datebar">${esc(fut)}</div>` : ''}
+  S.entryKey = `${date}|${shift}|${section}`;
+  body.innerHTML = `${fut ? `<div class="datebar">${esc(fut)}</div>` : ''}<div id="entryKept"></div>
     ${active.length ? '' : `<div class="panel muted">Nothing planned or entered for ${esc(section)} on ${esc(date)} ${esc(shift)} shift. Add a machine below.</div>`}
     <div class="cards" id="cards">${active.map(machineCard).join('')}</div>
     ${others.length ? `<div class="toolbar" style="margin-top:14px">
@@ -673,6 +735,8 @@ async function loadEntry() {
     bindCard($('#cards').lastElementChild); $(`#addM option[value="${c}"]`).remove();
     $('#cards').lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
+  const kept = entryRestore();
+  if (kept) $('#entryKept').innerHTML = `<div class="hint" style="margin-bottom:12px">Your unsaved values on ${kept} machine card${kept === 1 ? '' : 's'} are still here – press <b>Save</b> on each card to save them.</div>`;
 }
 function machineCard(mc) {
   const { P, O, T, opByMachine } = S.entry;
@@ -719,9 +783,9 @@ function bindCard(card) {
   $$('[data-del]', card).forEach(b => b.onclick = async () => {
     if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Delete?'; b.style.fontSize = '12px'; setTimeout(() => { b.dataset.confirm = ''; b.textContent = '×'; b.style.fontSize = ''; }, 3000); return; }
     const { error } = await sb.from(b.dataset.del).delete().eq('id', b.dataset.id);
-    if (error) return fail(error, 'Delete'); toast('Deleted'); loadEntry();
+    if (error) return fail(error, 'Delete'); toast('Deleted'); entrySnapshot(); loadEntry();
   });
-  ['input', 'change'].forEach(ev => card.addEventListener(ev, () => { const s = $('.f-save', card); if (s.dataset.force) { delete s.dataset.force; s.textContent = 'Save'; s.classList.replace('warn', 'primary'); $('.warnbox', card).classList.add('hidden'); } }));
+  ['input', 'change'].forEach(ev => card.addEventListener(ev, () => { card.dataset.touched = '1'; const s = $('.f-save', card); if (s.dataset.force) { delete s.dataset.force; s.textContent = 'Save'; s.classList.replace('warn', 'primary'); $('.warnbox', card).classList.add('hidden'); } }));
   $('.f-save', card).onclick = async () => {
     const btn = $('.f-save', card), warn = $('.warnbox', card);
     const qty = num($('.f-qty', card).value), ss = num($('.f-ss', card).value), ms = num($('.f-ms', card).value);
@@ -774,6 +838,7 @@ function bindCard(card) {
       if (error) { btn.disabled = false; btn.textContent = 'Save'; return fail(error, 'Saving stoppages'); }
     }
     toast(`${mc.name} saved`, 'ok');
+    entrySnapshot(mc.code);      // other cards keep what was typed on them
     loadEntry();
   };
 }
@@ -793,6 +858,7 @@ const GRIDS = {
 let bulkTab = 'output';
 const niceDate = d => new Date(d + 'T00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 function renderBulk() {
+  S.leave = bulkSnapshot;
   $('#app').innerHTML = `<div class="hint">Spreadsheet-style entry from paper sheets. Choose the <b>date</b> and <b>shift</b> once at the top – every row is saved to that date and shift.
       <b>Tab</b>/<b>Enter</b> moves between cells. You can paste straight from Excel (columns in the same order as the grid, starting with Machine).
       The product list only shows products for the machine's section. Rows with problems turn red and are listed above the grid. * = required.</div>
@@ -802,14 +868,33 @@ function renderBulk() {
     <div class="tablewrap" style="max-height:62vh"><table class="gridtbl" id="grid"></table></div>
     <h3 style="margin:22px 0 10px" id="gExTitle"></h3>
     <div id="gExisting"></div>`;
-  $$('.tabs button').forEach(b => { b.classList.toggle('on', b.dataset.t === bulkTab); b.onclick = () => { bulkTab = b.dataset.t; renderBulk(); }; });
+  $$('.tabs button').forEach(b => { b.classList.toggle('on', b.dataset.t === bulkTab); b.onclick = () => { bulkSnapshot(); bulkTab = b.dataset.t; renderBulk(); }; });
   buildGrid(20);
+  const kept = bulkRestore();
   $('#gAdd').onclick = () => addGridRows(10);
   $('#gClear').onclick = () => { buildGrid(20); $('#gInfo').textContent = ''; $('#gErrs').classList.add('hidden'); };
   $('#gSave').onclick = saveGrid;
   bindCtx(() => { bulkLabels(); loadExisting(); });
   bulkLabels();
+  if (kept) $('#gInfo').innerHTML = `Your ${kept} unsaved row${kept === 1 ? ' is' : 's are'} still here. They will be saved to the date and shift chosen above when you press <b>Save rows</b>.`;
   loadExisting();
+}
+// keep unsaved grid rows (per tab) when moving to another screen or tab; they go to whatever date/shift is chosen when saved
+function bulkSnapshot() {
+  if (!$('#grid tbody')) return;
+  const rows = $$('#grid tbody tr').filter(tr => !tr.classList.contains('saved'))
+    .map(tr => Object.fromEntries($$('td[data-k]', tr).map(td => [td.dataset.k, $('input', td).value])))
+    .filter(v => Object.entries(v).some(([k, x]) => k !== 'unit' && String(x).trim()));
+  S.drafts['bulk-' + bulkTab] = rows.length ? rows : null;
+}
+function bulkRestore() {
+  const k = 'bulk-' + bulkTab, rows = S.drafts[k]; if (!rows) return 0;
+  S.drafts[k] = null;
+  const tb = $('#grid tbody'); if (rows.length + 5 > tb.children.length) addGridRows(rows.length + 5 - tb.children.length);
+  rows.forEach((v, i) => { const tr = tb.children[i];
+    for (const [key, x] of Object.entries(v)) { const inp = $(`[data-k="${key}"] input`, tr); if (inp) inp.value = x; }
+    if ($('[data-k=machine] input', tr)) onMachineCell(tr); });
+  return rows.length;
 }
 function bulkLabels() {
   const t = `${niceDate(S.ctx.date)} · ${S.ctx.shift} shift`;
@@ -1329,13 +1414,164 @@ async function loadStops() {
 }
 
 /* =========================================================
+   STORES ISSUE – products planned for one shift, for issuing raw
+   materials from the stores. Code, Product, sum Output (planned output).
+   Opens on the latest planned shift (newest date + shift with plan lines).
+   A cooked batch is planned on the Cooker, Uniplast and Cooling Conveyor,
+   so COOKED products are counted on Cooking machines only.
+   "Copy for Google Sheets" copies the data rows (no headings) as tab-separated text.
+   ========================================================= */
+/* =========================================================
+   SAP SUMMARY (clerk, admin) – output per product per section for one shift,
+   to type into SAP. View only. Cooked products are counted on the cookers only
+   (the same batch is also entered on the Uniplast and Cooling Conveyor).
+   ========================================================= */
+const SP = { date: null, shift: null };
+function renderSap() {
+  if (!SP.date) { SP.date = S.ctx.date; SP.shift = S.ctx.shift; }
+  $('#app').innerHTML = `<div class="hint">Output posted for one shift, added up per product per section, for entering into SAP.
+      Cooked output is counted on the cookers only (not again on the Uniplast and Cooling Conveyor); scrap recorded on the Uniplast and Cooling Conveyor still shows under Forming and Cooling. Recycling (Scrap section) and lines with no product (vehicles, generators, meters) are left out.</div>
+    <div class="toolbar">
+      <div class="field"><label for="spDate">Date</label><input id="spDate" type="date" value="${SP.date}" max="${kenyaToday()}"></div>
+      <div class="field"><label for="spShift">Shift</label><select id="spShift">${S.m.shifts.map(s => `<option ${s.code === SP.shift ? 'selected' : ''}>${esc(s.code)}</option>`).join('')}</select></div>
+      <button class="btn" id="spRefresh" type="button">Refresh</button>
+    </div><div id="spBody"><div class="muted">Loading…</div></div>`;
+  $('#spDate').onchange = e => { if (!e.target.value) { e.target.value = SP.date; return flagInput(e.target, 'Pick a date.'); } SP.date = e.target.value; loadSap(); };
+  $('#spShift').onchange = e => { SP.shift = e.target.value; loadSap(); };
+  $('#spRefresh').onclick = loadSap;
+  loadSap();
+}
+async function loadSap() {
+  const body = $('#spBody'); body.innerHTML = `<div class="muted">Loading…</div>`;
+  const want = SP.date + '|' + SP.shift;
+  let data;
+  try { data = await fetchAll(() => sb.from('output_entries').select('machine_code,product_code,qty,unit,output_kg,sweet_scrap_kg,material_scrap_kg')
+    .eq('prod_date', SP.date).eq('shift', SP.shift).order('id')); }
+  catch (e) { return fail(e, 'Loading output'); }
+  if (S.view !== 'sap' || $('#spBody') !== body || want !== SP.date + '|' + SP.shift) return;
+  const by = {}; let noProd = 0, cookedElsewhere = 0, recycling = 0;
+  for (const o of data) {
+    const mc = S.m.machineBy[o.machine_code], p = S.m.productBy[o.product_code];
+    if (!o.product_code) { noProd++; continue; }
+    const sec = mc?.department || '(unknown machine)';
+    if (sec === 'Scrap') { recycling++; continue; }        // Recycling is not posted to SAP from here (user, 12 Nov 2026)
+    // a cooked batch is entered again on the Uniplast and Cooling Conveyor: count its output on the cooker only,
+    // but keep the scrap recorded on those lines
+    const repeat = p?.stage === 'COOKED' && (sec === 'Forming' || sec === 'Cooling');
+    if (repeat) cookedElsewhere++;
+    const unit = repeat ? '' : o.unit || '';
+    const r = (by[sec + '|' + o.product_code + '|' + unit] ||= { sec, code: o.product_code, product: p?.description || o.product_code, unit, qty: 0, kg: 0, ss: 0, ms: 0, n: 0, repeat });
+    if (!repeat) { r.qty += +o.qty || 0; r.kg += +o.output_kg || 0; }
+    r.ss += +o.sweet_scrap_kg || 0; r.ms += +o.material_scrap_kg || 0; r.n++;
+  }
+  const rows = Object.values(by).filter(r => !r.repeat || r.ss || r.ms).sort((a, b) => sectionRank(a.sec) - sectionRank(b.sec) || a.sec.localeCompare(b.sec) || a.product.localeCompare(b.product));
+  const when = niceDate(SP.date);
+  const fut = futureEntryError(SP.date, SP.shift);
+  const frac = shiftFraction(SP.date, SP.shift);
+  const note = fut ? `<div class="datebar">${esc(fut)}</div>` : frac < 1 ? `<div class="warnbox" style="margin-bottom:10px">This shift is still running – the figures are only what has been posted so far.</div>` : '';
+  if (!rows.length) { body.innerHTML = note + `<div class="panel muted">No output with a product posted for ${esc(when)} · ${esc(SP.shift)} shift.</div>`; return; }
+  const d2 = v => fmt(r4(v), r4(v) % 1 ? 2 : 0);
+  let html = '', last = null;
+  for (const r of rows) {
+    const first = r.sec !== last; last = r.sec;
+    html += `<tr${first && html ? ' class="secstart"' : ''}><td>${esc(SP.date)}</td><td>${esc(SP.shift)}</td><td>${first ? `<b>${esc(r.sec)}</b>` : `<span class="muted">${esc(r.sec)}</span>`}</td><td>${esc(r.code)}</td><td>${esc(r.product)}</td>
+      ${r.repeat ? `<td class="n muted small" colspan="3" style="text-align:center">output counted on the cooker</td>` : `<td class="n"><b>${d2(r.qty)}</b></td><td>${esc(r.unit)}</td><td class="n">${d2(r.kg)}</td>`}<td class="n">${d2(r.ss)}</td><td class="n">${d2(r.ms)}</td></tr>`;
+  }
+  body.innerHTML = note + `<div class="muted small" style="margin-bottom:8px"><b>${esc(when)} · ${esc(SP.shift)} shift</b> · ${rows.length} line${rows.length === 1 ? '' : 's'} from ${data.length} output entr${data.length === 1 ? 'y' : 'ies'}</div>
+    <div class="tablewrap"><table id="spTable"><thead><tr><th>Date</th><th>Shift</th><th>Section</th><th>Item code</th><th>Product</th><th class="n">Output qty</th><th>Unit</th><th class="n">Output kg</th><th class="n">Sweet scrap kg</th><th class="n">Material scrap kg</th></tr></thead>
+    <tbody>${html}</tbody></table></div>
+    <div class="muted small" style="margin-top:8px">${cookedElsewhere ? `Output of the ${cookedElsewhere} cooked entr${cookedElsewhere === 1 ? 'y' : 'ies'} on Uniplast / Cooling Conveyor is not added again (counted on the cookers); their scrap is shown in the Forming / Cooling rows. ` : ''}${recycling ? `${recycling} Recycling (Scrap section) entr${recycling === 1 ? 'y' : 'ies'} left out. ` : ''}${noProd ? `${noProd} entr${noProd === 1 ? 'y' : 'ies'} with no product left out. ` : ''}Output kg = output in kg (for cartons: cartons × nett weight).</div>`;
+}
+
+const SI = { date: null, shift: null, rows: [] };
+const shiftRank = sh => { const x = S.m.shifts.find(s => s.code === sh); return x ? +x.sort_order || 0 : 0; };
+async function latestPlannedShift() {
+  const { data, error } = await sb.from('plan_lines').select('plan_date,shift').order('plan_date', { ascending: false }).limit(500);
+  if (error) throw error;
+  if (!data.length) return null;
+  const d = data[0].plan_date, shifts = [...new Set(data.filter(r => r.plan_date === d).map(r => r.shift))];
+  shifts.sort((a, b) => shiftRank(b) - shiftRank(a));
+  return { date: d, shift: shifts[0] };
+}
+async function renderStores() {
+  $('#app').innerHTML = `<div class="muted">Finding the latest plan…</div>`;
+  let latest = null;
+  try { latest = await latestPlannedShift(); } catch (e) { fail(e, 'Finding the latest plan'); }
+  SI.latest = latest;
+  if (latest) { SI.date = latest.date; SI.shift = latest.shift; }
+  else { const c = currentShift(); SI.date = c.date; SI.shift = c.shift; }
+  $('#app').innerHTML = `<div class="hint">Products planned for the shift, for issuing raw materials from the stores. Opens on the latest planned shift.
+      Cooked products are counted on the cookers only (not again on the Uniplast and Cooling Conveyor).</div>
+    <div class="toolbar">
+      <div class="field"><label for="siDate">Date</label><input id="siDate" type="date" value="${SI.date}"></div>
+      <div class="field"><label for="siShift">Shift</label><select id="siShift">${S.m.shifts.map(s => `<option ${s.code === SI.shift ? 'selected' : ''}>${esc(s.code)}</option>`).join('')}</select></div>
+      <button class="btn" id="siLatest" type="button">Latest plan</button>
+      <button class="btn primary" id="siCopy" type="button">Copy for Google Sheets</button>
+    </div><div id="siBody"><div class="muted">Loading…</div></div>`;
+  $('#siDate').onchange = e => { if (!e.target.value) { e.target.value = SI.date; return flagInput(e.target, 'Pick a date.'); } SI.date = e.target.value; loadStores(); };
+  $('#siShift').onchange = e => { SI.shift = e.target.value; loadStores(); };
+  $('#siLatest').onclick = () => renderStores();
+  $('#siCopy').onclick = copyStores;
+  loadStores();
+}
+const r4 = n => Math.round(n * 1e4) / 1e4;
+async function loadStores() {
+  const body = $('#siBody'); body.innerHTML = `<div class="muted">Loading…</div>`;
+  const { data, error } = await sb.from('plan_lines').select('machine_code,product_code,planned_output,updated_at')
+    .eq('plan_date', SI.date).eq('shift', SI.shift).limit(5000);
+  if (error) return fail(error, 'Loading the plan');
+  if (S.view !== 'stores' || $('#siBody') !== body) return;
+  const by = {}; let lastChange = null, zero = 0;
+  for (const l of data) {
+    if (!lastChange || l.updated_at > lastChange) lastChange = l.updated_at;
+    if (!l.product_code) continue;
+    const p = S.m.productBy[l.product_code], mc = S.m.machineBy[l.machine_code];
+    if (p?.stage === 'COOKED' && mc?.department !== 'Cooking') continue;     // cooked: cooker rows only
+    const r = (by[l.product_code] ||= { code: l.product_code, product: p?.description || l.product_code, out: 0 });
+    r.out += +l.planned_output || 0;
+  }
+  let rows = Object.values(by).map(r => ({ ...r, out: r4(r.out) }));
+  zero = rows.filter(r => !r.out).length; rows = rows.filter(r => r.out);
+  rows.sort((a, b) => a.product.localeCompare(b.product));
+  SI.rows = rows;
+  const when = new Date(SI.date + 'T00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  const isLatest = SI.latest && SI.latest.date === SI.date && SI.latest.shift === SI.shift;
+  $('#siCopy').disabled = !rows.length;
+  if (!rows.length) { body.innerHTML = `<div class="panel muted">No products planned for ${esc(when)} · ${esc(SI.shift)} shift.</div>`; return; }
+  const changed = lastChange ? new Date(lastChange).toLocaleString('en-GB', { timeZone: 'Africa/Nairobi', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  body.innerHTML = `<div class="muted small" style="margin-bottom:8px"><b>${esc(when)} · ${esc(SI.shift)} shift</b>${isLatest ? ' (latest plan)' : ''}${changed ? ` · plan last changed ${esc(changed)}` : ''}</div>
+    <div class="tablewrap" style="max-width:720px"><table id="siTable"><thead><tr><th class="first">Code</th><th>Product</th><th class="n">sum Output</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td class="first">${esc(r.code)}</td><td>${esc(r.product)}</td><td class="n">${fmt(r.out, r.out % 1 ? 2 : 0)}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div class="muted small" style="margin-top:8px">${rows.length} product${rows.length === 1 ? '' : 's'}. sum Output = planned output (cooked and wrapped in kg, packed in cartons).
+      ${zero ? ` ${zero} product${zero === 1 ? '' : 's'} planned with no output left out.` : ''} The plan can still change, so copy it again if it is edited.</div>`;
+}
+async function copyStores() {
+  if (!SI.rows.length) return;
+  const tsv = SI.rows.map(r => [r.code, r.product, String(r.out)].map(v => String(v).replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\n');
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(tsv); ok = true; } } catch (e) { /* fall back below */ }
+  if (!ok) {
+    const t = document.createElement('textarea'); t.value = tsv; t.setAttribute('readonly', ''); t.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.appendChild(t); t.select();
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    t.remove();
+  }
+  if (ok) toast(`Copied ${SI.rows.length} row${SI.rows.length === 1 ? '' : 's'}. In Google Sheets, click a cell and press Ctrl+V.`);
+  else toast('Could not copy automatically. Select the table rows with the mouse and press Ctrl+C.', 'err');
+}
+
+/* =========================================================
    PRODUCTION PLANNING BOARD (planner, admin; others view only)
    One row per machine + product, like the Machine Planning sheet.
    Saving updates changed lines in place, adds new ones and deletes
    removed ones, so the first-saved plan and the change history
    (planning accuracy) stay correct.
    ========================================================= */
-const PLAN_SECTIONS = ['Cooking', 'Forming', 'Cooling', 'Wrapping', 'White Mint', 'Manual', 'Packaging'];
+// Forming (Uniplast) and Cooling have no section of their own: they are planned with their cooker in Cooking.
+const PLAN_SECTIONS = ['Cooking', 'Wrapping', 'White Mint', 'Manual', 'Packaging'];
+const COOK_PARTS = ['Cooking', 'Forming', 'Cooling'];
+const planSec = r => r.kind === 'cook' || COOK_PARTS.includes(sectionOf(r)) ? 'Cooking' : sectionOf(r);   // section the row is shown in
 const PL = { rows: [], orig: {}, dirty: false, readOnly: true, seq: 0 };
 const r2 = n => Math.round(n * 100) / 100;
 // Expected output – same as the Machine Planning sheet:
@@ -1359,9 +1595,16 @@ const prevShift = (d, sh) => sh === 'Night' ? { date: d, shift: 'Day' } : { date
 
 function renderPlan() {
   PL.readOnly = !CAN.plan(S.profile.role);
+  // unsaved changes from before (screen left without saving) – reopen that date and shift with them
+  const keep = !PL.readOnly && PL.dirty && PL.date;
+  if (keep) { S.ctx.date = PL.date; S.ctx.shift = PL.shift; }
   $('#app').innerHTML = `<div class="hint">${PL.readOnly ? 'View only – shift supervisors, planners and admin can change the plan.' :
       `Plan each machine for the shift: product, running hours, cleaning/changeover hours and planned output.
-       <b>Expected output</b> is worked out from the machine capacity (as in the Machine Planning sheet). Planned output fills in from the template formula (grey) – type over it if you plan differently.
+       <b>Expected output</b> is worked out from the machine capacity (as in the Machine Planning sheet). Planned output fills in from the template formula (grey) – type over it if you plan differently.<br>
+       <b>Machine and product boxes:</b> type part of the name to search, then pick with the mouse or ↑ ↓ and Enter.
+       <b>Copy down:</b> click a machine or product box and drag the small blue square at its corner over the lines below (or above), like Excel. Machines count up (M/C 16 → 17 → 18); hold <b>Ctrl</b> when you let go to copy the same machine. Products are copied.<br>
+       <b>Cooking lines</b> plan a cooker, its Uniplast and its cooling conveyor together: one product, running hours, cleaning hours and planned output for all three (saved as three machine lines, and shown together again when the plan is opened). Older lines that don't match their cooker show as single lines in Cooking.
+       <b>+ Add wrapping line</b> takes one or two machines running the same product for the same hours; the planned output is for both together and is split equally when saved. Once saved, each wrapping machine shows as its own line.<br>
        The plan can be changed at any time, even after production. The plan as it stands when the shift starts is kept as the <b>original</b> for planning accuracy.`}</div>
     <div class="toolbar">
       <div class="field"><label for="cDate">Date</label><input id="cDate" type="date" value="${S.ctx.date}"></div>
@@ -1380,9 +1623,14 @@ function renderPlan() {
   $('#cShift').onchange = e => { const v = e.target.value; if (PL.dirty) { e.target.value = S.ctx.shift; return dirtyBlock(() => setShift(v)); } setShift(v); };
   if (!PL.readOnly) { $('#pSave').onclick = savePlan; $('#pCopy').onclick = copyPlan; }
   $('#pXls').onclick = exportPlan;
-  loadPlan();
+  S.leave = () => { fillHide(); comboClose(); };
+  if (keep) {
+    const p = prevShift(PL.date, PL.shift); $('#pCopyDate').value = p.date; $('#pCopyShift').value = p.shift;
+    drawPlan();
+    planMsg(`Your unsaved changes to the ${esc(niceDate(PL.date))} ${esc(PL.shift)} plan are still here. Press <b>Save plan</b> to save them.`, 'warn');
+  } else loadPlan();
 }
-window.addEventListener('beforeunload', e => { if (S.view === 'plan' && PL.dirty) { e.preventDefault(); e.returnValue = ''; } });
+window.addEventListener('beforeunload', e => { if (PL.dirty) { e.preventDefault(); e.returnValue = ''; } });
 function dirtyBlock(go) {
   planMsg(`You have unsaved changes to this plan. <button class="btn sm" id="pDiscard">Discard changes</button> or press <b>Save plan</b> first.`, 'warn');
   $('#pDiscard').onclick = () => { PL.dirty = false; planMsg(''); go(); };
@@ -1395,36 +1643,102 @@ async function loadPlan() {
   if (!PL.readOnly) { const p = prevShift(date, shift); $('#pCopyDate').value = p.date; $('#pCopyShift').value = p.shift; }
   const pl = await sb.from('plan_lines').select('*').eq('plan_date', date).eq('shift', shift).order('id');
   if (pl.error) return fail(pl.error, 'Loading plan');
+  if (S.view !== 'plan' || date !== S.ctx.date || shift !== S.ctx.shift) return;
   PL.orig = Object.fromEntries(pl.data.map(r => [r.id, r]));
-  PL.rows = pl.data.map(r => ({ key: ++PL.seq, id: r.id, machine: r.machine_code, product: r.product_code || '', hrs: r.planned_hrs, co: r.changeover_hrs,
-    out: r.planned_output, auto: false }));
-  PL.dirty = false;
+  PL.rows = planRowsFrom(pl.data, true).rows;
+  PL.dirty = false; PL.date = date; PL.shift = shift;
   drawPlan();
   const started = shiftStarted(date, shift);
   if (!PL.readOnly && started) planMsg(`This shift has started, so the original plan is fixed. Any change you save now shows in planning accuracy as added, changed or removed.`);
 }
-function sectionOf(row) { return S.m.machineBy[row.machine]?.department || row.section; }
+
+/* ---------- cooking groups from saved lines ----------
+   The database keeps one plan line per machine, with no link between a cooker and its Uniplast / cooling conveyor.
+   When a plan is opened (or copied) they are grouped again: a cooker line, a Uniplast (Forming) line and a cooling
+   line with the same product, running hours, cleaning hours and planned output. If more than one could match, the
+   line saved closest to it is taken (the app saves a group's three lines one after the other, so its own groups come
+   back exactly). Anything that doesn't match stays a single line (shown in Cooking).
+   lines: plan_lines records in id order; withIds: keep the ids (opening a plan) or not (copying). */
+function planRowsFrom(lines, withIds, copyHrs = true) {
+  const dept = l => S.m.machineBy[l.machine_code]?.department;
+  const nv = v => v == null || v === '' ? null : +v;
+  const match = (a, b) => (a.product_code || '') === (b.product_code || '') && nv(a.planned_hrs) === nv(b.planned_hrs)
+    && (nv(a.changeover_hrs) || 0) === (nv(b.changeover_hrs) || 0) && nv(a.planned_output) === nv(b.planned_output);
+  const used = new Set(), groups = new Map();      // cooker line id -> [uniplast line, cooling line]
+  const closest = (to, d) => lines.filter(l => !used.has(l.id) && dept(l) === d && match(l, to))
+    .sort((a, b) => Math.abs(a.id - to.id) - Math.abs(b.id - to.id) || a.id - b.id)[0];
+  for (const ck of lines.filter(l => dept(l) === 'Cooking')) {
+    const up = closest(ck, 'Forming'); if (!up) continue; used.add(up.id);
+    const cc = closest(up, 'Cooling'); if (!cc) { used.delete(up.id); continue; }
+    used.add(cc.id); used.add(ck.id); groups.set(ck.id, [up, cc]);
+  }
+  const vals = l => copyHrs ? { hrs: l.planned_hrs, co: l.changeover_hrs, out: l.planned_output, auto: false } : { hrs: null, co: null, out: null, auto: true };
+  const rows = [];
+  for (const l of lines) {
+    if (used.has(l.id) && !groups.has(l.id)) continue;           // Uniplast / cooling already in a group
+    const g = groups.get(l.id);
+    rows.push(g
+      ? { key: ++PL.seq, kind: 'cook', section: 'Cooking', id: withIds ? l.id : null, id2: withIds ? g[0].id : null, id3: withIds ? g[1].id : null,
+          machine: l.machine_code, m2: g[0].machine_code, m3: g[1].machine_code, product: l.product_code || '', text: {}, ...vals(l) }
+      : { key: ++PL.seq, kind: 'single', section: dept(l), id: withIds ? l.id : null, machine: l.machine_code, product: l.product_code || '', text: {}, ...vals(l) });
+  }
+  return { rows, groups: groups.size };
+}
+
+/* ---------- screen rows ----------
+   A screen row is one of:
+     single – one machine (saved lines outside a group, and new lines in White Mint, Manual, Packaging)
+     cook   – cooking line: cooker + Uniplast + cooling conveyor, all required; saved as three lines with the
+              same product, hours and planned output (as the Machine Planning sheet stores them); ids in id, id2, id3
+     wrap   – new wrapping line: machine 1 + optional machine 2; same product and hours; planned output is for
+              both together and split equally when saved */
+function sectionOf(row) { return row.section || S.m.machineBy[row.machine]?.department; }
+const planMachinesIn = sec => S.m.machines.filter(m => m.active && m.department === sec).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+const MF = {
+  single: r => [{ f: 'machine', dept: sectionOf(r), label: ['Forming', 'Cooling'].includes(sectionOf(r)) ? 'Not grouped' : '', ng: true }],
+  cook: () => [{ f: 'machine', dept: 'Cooking', label: 'Cooker' }, { f: 'm2', dept: 'Forming', label: 'Uniplast' }, { f: 'm3', dept: 'Cooling', label: 'Cooling' }],
+  wrap: () => [{ f: 'machine', dept: 'Wrapping', label: 'Machine 1' }, { f: 'm2', dept: 'Wrapping', label: 'Machine 2', optional: true }],
+};
+const mfields = r => MF[r.kind || 'single'](r);
+const r4p = n => Math.round(n * 1e4) / 1e4;
+const LINE_ID = { machine: 'id', m2: 'id2', m3: 'id3' };     // saved plan line behind each machine box (wrapping rows are new only)
+// the plan lines a screen row is saved as (chosen machines only)
+function rowLines(r) {
+  const o = num(r.out), fs = mfields(r).filter(x => r[x.f]);
+  const share = r.kind === 'wrap' && fs.length > 1 && o != null && !Number.isNaN(o) ? r4p(o / fs.length) : o;
+  return fs.map(x => ({ f: x.f, machine: r[x.f], out: share, id: r[LINE_ID[x.f]] || null }));
+}
+// default planned output: the template formula for the cooker (cooking line) or for both machines added up (wrapping line)
+function rowDefault(r) {
+  const p = S.m.productBy[r.product], h = num(r.hrs);
+  const fs = r.kind === 'cook' ? ['machine'] : mfields(r).map(x => x.f);
+  const v = fs.filter(f => r[f]).map(f => planDefault(S.m.machineBy[r[f]], p, h)).filter(x => x != null);
+  return v.length ? v.reduce((a, b) => a + b, 0) : null;
+}
+const rowName = r => mfields(r).map(x => S.m.machineBy[r[x.f]]?.name).filter(Boolean).join(' + ') || `${sectionOf(r) || ''} line`;
+function productItems(r) {
+  const st = STAGES_BY_SECTION[sectionOf(r)];
+  return S.m.products.filter(p => !st || st.includes(p.stage)).map(p => ({ value: p.item_code, label: productLabel(p) }));
+}
+
 function drawPlan() {
   const ro = PL.readOnly;
   const body = $('#planBody');
-  const machinesIn = sec => S.m.machines.filter(m => m.active && m.department === sec).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  fillHide(); comboClose();
   let html = '';
   for (const sec of PLAN_SECTIONS) {
-    const rows = PL.rows.filter(r => sectionOf(r) === sec);
+    const rows = PL.rows.filter(r => planSec(r) === sec);
     if (ro && !rows.length) continue;
-    const mlist = machinesIn(sec);
-    const groups = [...new Set(mlist.map(m => m.group_code || sec))];
-    const opts = sel => `<option value=""></option>` + groups.map(g => `<optgroup label="${esc(g)}">${mlist.filter(m => (m.group_code || sec) === g).map(m => `<option value="${m.code}" ${m.code === sel ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</optgroup>`).join('');
-    html += `<tbody class="psec"><tr class="grp"><td colspan="9">${esc(sec)} <span class="muted small" style="font-weight:500" data-sum="${esc(sec)}"></span></td></tr>`;
-    for (const r of rows) html += planRowHTML(r, opts, ro);
+    html += `<tbody class="psec" data-sec="${esc(sec)}"><tr class="grp"><td colspan="9">${esc(sec)} <span class="muted small" style="font-weight:500" data-sum="${esc(sec)}"></span></td></tr>`;
+    for (const r of rows) html += planRowHTML(r, ro);
     if (!ro) html += `<tr class="padd"><td colspan="9"><button class="btn sm ghost" data-add="${esc(sec)}">+ Add ${esc(sec.toLowerCase())} line</button></td></tr>`;
     html += `</tbody>`;
   }
   body.innerHTML = `<div class="tablewrap" style="max-height:none"><table class="gridtbl plantbl"><thead><tr>
-      <th style="min-width:190px">Machine</th><th style="min-width:330px">Product</th><th class="n" style="width:95px">Running<br>hours</th><th class="n" style="width:105px">Cleaning /<br>changeover</th>
+      <th style="min-width:260px">Machine</th><th style="min-width:330px">Product</th><th class="n" style="width:95px">Running<br>hours</th><th class="n" style="width:105px">Cleaning /<br>changeover</th>
       <th class="n" style="width:120px">Planned<br>output</th><th style="width:56px">Unit</th><th class="n" style="width:100px">Expected<br>output</th><th class="n" style="width:110px">Unaccounted<br>hours</th>
       <th style="width:40px"></th></tr></thead>${html || `<tbody><tr><td colspan="9" class="muted" style="padding:14px">No plan for this shift.</td></tr></tbody>`}</table></div>
-    <div class="muted small" style="margin-top:8px">Expected output = capacity per day × running hours ÷ 24 × product purchasing factor (not for cookers) × machine packing factor.
+    <div class="muted small" style="margin-top:8px">Expected output = capacity per day × running hours ÷ 24 × product purchasing factor (not for cookers) × machine packing factor – shown for each machine.
       Unaccounted hours = shift length (${S.m.shifts.map(s => `${s.code} ${s.hours} h`).join(', ')}) − running − cleaning hours on that machine; red if the machine is planned longer than the shift.</div>
     <h3 style="margin:22px 0 10px">Cooked vs wrapped</h3><div id="pCvW"></div>`;
   if (!ro) {
@@ -1433,71 +1747,204 @@ function drawPlan() {
   }
   refreshPlanCalcs();
 }
-function planRowHTML(r, opts, ro) {
-  const mc = S.m.machineBy[r.machine], p = S.m.productBy[r.product];
-  if (ro) return `<tr class="prow" data-key="${r.key}"><td class="ro">${esc(mc?.name || r.machine)}</td><td class="ro">${esc(p ? productLabel(p) : '')}</td><td class="n ro">${fmt(r.hrs, 2)}</td><td class="n ro">${fmt(r.co, 2)}</td>
-    <td class="n ro">${fmt(r.out)}</td><td class="u"></td><td class="n e"></td><td class="n ua"></td><td></td></tr>`;
-  return `<tr class="prow" data-key="${r.key}">
-    <td data-k="machine"><select>${opts(r.machine)}</select></td>
-    <td data-k="product"><input list="${mc ? productListId(mc) : 'dl-products'}" value="${esc(p ? productLabel(p) : (r.productText || ''))}" placeholder="${mc && !needsProduct(mc) ? 'no product' : ''}"></td>
+function planRowHTML(r, ro) {
+  const p = S.m.productBy[r.product], fs = mfields(r);
+  const subs = cls => `<td class="n ${cls}">${fs.map(() => '<div class="sub"></div>').join('')}</td>`;
+  if (ro) {
+    const mnames = fs.map(x => { const mc = S.m.machineBy[r[x.f]]; return `<div class="mf">${x.label ? `<span class="ml${x.ng ? ' ng' : ''}">${x.label}</span>` : ''}${esc(mc?.name || r[x.f] || '')}</div>`; }).join('');
+    return `<tr class="prow ${fs.length > 1 ? 'multi' : ''}" data-key="${r.key}"><td class="ro">${mnames}</td><td class="ro">${esc(p ? productLabel(p) : '')}</td><td class="n ro">${fmt(r.hrs, 2)}</td><td class="n ro">${fmt(r.co, 2)}</td>
+    <td class="n ro">${fmt(r.out)}</td><td class="u"></td>${subs('e')}${subs('ua')}<td></td></tr>`; }
+  const mcell = fs.map(x => { const mc = S.m.machineBy[r[x.f]];
+    return `<div class="mf" data-f="${x.f}">${x.label ? `<span class="ml${x.ng ? ' ng' : ''}">${x.label}</span>` : ''}<input data-fill="${x.f}" autocomplete="off" value="${esc(mc ? mc.name : (r.text?.[x.f] || ''))}" placeholder="${x.optional ? 'optional' : 'type to search'}"></div>`; }).join('');
+  const one = S.m.machineBy[r.machine];
+  return `<tr class="prow ${fs.length > 1 ? 'multi' : ''}" data-key="${r.key}">
+    <td data-k="mach">${mcell}</td>
+    <td data-k="product"><input data-fill="product" autocomplete="off" value="${esc(p ? productLabel(p) : (r.text?.product || ''))}" placeholder="${one && !needsProduct(one) && r.kind === 'single' ? 'no product' : 'type code or name'}"></td>
     <td data-k="hrs"><input inputmode="decimal" value="${r.hrs ?? ''}"></td>
     <td data-k="co"><input inputmode="decimal" value="${r.co ?? ''}"></td>
     <td data-k="out"><input inputmode="decimal" class="${r.auto ? 'auto' : ''}" value="${r.out ?? ''}"></td>
-    <td class="u"></td><td class="n e"></td><td class="n ua"></td>
+    <td class="u"></td>${subs('e')}${subs('ua')}
     <td><button class="x" type="button" title="Remove this line">×</button></td></tr>`;
 }
 function addPlanRow(sec) {
-  const r = { key: ++PL.seq, id: null, machine: '', product: '', hrs: null, co: null, out: null, auto: true, section: sec };
+  const kind = sec === 'Cooking' ? 'cook' : sec === 'Wrapping' ? 'wrap' : 'single';
+  const r = { key: ++PL.seq, id: null, kind, machine: '', m2: '', m3: '', product: '', hrs: null, co: null, out: null, auto: true, section: sec, text: {} };
   PL.rows.push(r); PL.dirty = true;
   drawPlan();
-  const tr = $(`tr.prow[data-key="${r.key}"]`); if (tr) $('select', tr).focus();
+  const tr = $(`tr.prow[data-key="${r.key}"]`); if (tr) $('input', tr).focus();
 }
 function bindPlanRow(tr) {
-  const r = PL.rows.find(x => x.key === +tr.dataset.key);
-  const sel = $('[data-k=machine] select', tr), pin = $('[data-k=product] input', tr), hin = $('[data-k=hrs] input', tr), cin = $('[data-k=co] input', tr), oin = $('[data-k=out] input', tr);
+  const r = PL.rows.find(x => x.key === +tr.dataset.key); r.text ||= {};
+  const pin = $('[data-k=product] input', tr), hin = $('[data-k=hrs] input', tr), cin = $('[data-k=co] input', tr), oin = $('[data-k=out] input', tr);
   [hin, cin, oin].forEach(el => guardInput(el, 'num'));     // digits and one decimal point only
-  const touch = () => { PL.dirty = true; $$('td', tr).forEach(td => { td.classList.remove('bad'); td.title = ''; }); };
+  const touch = () => { PL.dirty = true; $$('td, .mf', tr).forEach(el => { el.classList.remove('bad'); el.title = ''; }); };
   const autoOut = () => {   // keep the template default in Planned output until the planner types their own figure
     if (!r.auto) return;
-    const v = planDefault(S.m.machineBy[r.machine], S.m.productBy[r.product], num(r.hrs));
+    const v = rowDefault(r);
     r.out = v; oin.value = v ?? ''; oin.classList.add('auto');
   };
-  sel.onchange = () => { touch(); r.machine = sel.value; const mc = S.m.machineBy[r.machine];
-    pin.setAttribute('list', mc ? productListId(mc) || '' : 'dl-products'); pin.placeholder = mc && !needsProduct(mc) ? 'no product' : '';
-    autoOut(); refreshPlanCalcs(); };
-  pin.onchange = () => { touch(); const c = productFromLabel(pin.value); r.product = c || ''; r.productText = pin.value;
-    if (c) pin.value = productLabel(S.m.productBy[c]); autoOut(); refreshPlanCalcs(); };
+  for (const x of mfields(r)) {
+    const inp = $(`.mf[data-f="${x.f}"] input`, tr);
+    combo(inp, () => planMachinesIn(x.dept).map(m => ({ value: m.code, label: m.name, note: m.group_code && m.group_code !== m.department ? m.group_code : '' })),
+      (code, text) => { touch(); r[x.f] = code || ''; r.text[x.f] = text;
+        if (r.kind === 'single') { const mc = S.m.machineBy[r.machine]; pin.placeholder = mc && !needsProduct(mc) ? 'no product' : 'type code or name'; }
+        autoOut(); refreshPlanCalcs(); },
+      text => { touch(); r.text[x.f] = text; });
+  }
+  combo(pin, () => productItems(r), (code, text) => { touch(); r.product = code || ''; r.text.product = text; autoOut(); refreshPlanCalcs(); },
+    text => { touch(); r.text.product = text; }, txt => productFromLabel(txt));
   hin.oninput = () => { touch(); r.hrs = hin.value; autoOut(); refreshPlanCalcs(); };
   cin.oninput = () => { touch(); r.co = cin.value; refreshPlanCalcs(); };
   oin.oninput = () => { touch(); r.out = oin.value; r.auto = oin.value === ''; oin.classList.toggle('auto', r.auto); refreshPlanCalcs(); };
   $('.x', tr).onclick = () => { PL.rows = PL.rows.filter(x => x !== r); PL.dirty = true; drawPlan(); };
-  [sel, pin, hin, cin, oin].forEach((el, c) => el.addEventListener('keydown', e => {
-    if (e.key !== 'Enter' || el.tagName === 'SELECT') return; e.preventDefault();
+  // Enter moves to the same box on the next line
+  $$('input', tr).forEach(el => el.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || e.defaultPrevented) return; e.preventDefault();
+    const k = el.dataset.fill || el.closest('td').dataset.k;
     let nx = tr.nextElementSibling; while (nx && !nx.classList.contains('prow')) nx = nx.nextElementSibling;
-    if (nx) $$('select,input', nx)[c]?.focus();
+    if (nx) ($(`input[data-fill="${k}"]`, nx) || $(`[data-k="${k}"] input`, nx) || $('input', nx))?.focus();
   }));
+  $$('input[data-fill]', tr).forEach(el => el.addEventListener('focus', () => fillShow(el)));
 }
-// live calculations: unit, expected, unaccounted hours, actual, section totals, cooked vs wrapped
+
+/* ---------- type-to-search box ----------
+   items(): [{value, label, note}]; onPick(value, text) when a choice is made or typed text is committed
+   (value '' = blank, undefined = not recognised); onType(text) while typing. */
+const CB = { box: null, inp: null, list: [], idx: -1, pick: null };
+function combo(inp, items, onPick, onType, resolve) {
+  const commit = () => {
+    const t = inp.value.trim(); if (!t) return onPick('', '');
+    const all = items(), T = t.toUpperCase();
+    let hit = all.find(i => i.label.toUpperCase() === T || String(i.value).toUpperCase() === T);
+    let v = hit ? hit.value : (resolve ? resolve(t) : undefined);
+    if (v && !all.find(i => i.value === v)) v = undefined;        // recognised, but not allowed here
+    if (hit) inp.value = hit.label; else if (v) inp.value = all.find(i => i.value === v).label;
+    onPick(v, inp.value);
+  };
+  const open = q => {
+    const words = q.toUpperCase().split(/\s+/).filter(Boolean);
+    let list = items().filter(i => { const L = (i.label + ' ' + (i.note || '')).toUpperCase(); return words.every(w => L.includes(w)); });
+    if (words.length) {    // best first: whole phrase as typed, then a word starting with it, then the rest (list order kept)
+      const Q = words.join(' '), rank = i => { const L = i.label.toUpperCase(); return L === Q ? 0 : L.endsWith(' ' + Q) || L.endsWith('— ' + Q) ? 1 : L.includes(Q) ? (L.startsWith(Q) || L.includes(' ' + Q) ? 2 : 3) : 4; };
+      list = list.map((it, n) => ({ it, n, k: rank(it) })).sort((x, y) => x.k - y.k || x.n - y.n).map(x => x.it); }
+    CB.inp = inp; CB.list = list.slice(0, 80); CB.idx = words.length && CB.list.length ? 0 : -1; CB.more = list.length - CB.list.length;
+    CB.pick = i => { const it = CB.list[i]; if (!it) return; inp.value = it.label; comboClose(); onPick(it.value, it.label); };
+    comboDraw();
+  };
+  inp.addEventListener('focus', () => { if (!inp.readOnly) open(''); });
+  inp.addEventListener('click', () => { if (CB.inp !== inp && !inp.readOnly) open(''); });
+  inp.addEventListener('input', () => { onType?.(inp.value); open(inp.value); });
+  inp.addEventListener('keydown', e => {
+    const isOpen = CB.inp === inp && CB.box;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (!isOpen) return open(inp.value);
+      CB.idx = Math.max(0, Math.min(CB.list.length - 1, CB.idx + (e.key === 'ArrowDown' ? 1 : -1))); comboDraw(); }
+    else if (e.key === 'Enter' && isOpen && CB.idx >= 0) { e.preventDefault(); CB.pick(CB.idx); }
+    else if (e.key === 'Tab' && isOpen && CB.idx >= 0 && inp.value.trim()) CB.pick(CB.idx);
+    else if (e.key === 'Escape' && isOpen) { e.preventDefault(); comboClose(); }
+  });
+  inp.addEventListener('change', commit);
+  inp.addEventListener('blur', () => setTimeout(() => { if (CB.inp === inp && document.activeElement !== inp) comboClose(); }, 120));
+}
+function comboDraw() {
+  const inp = CB.inp; if (!inp || !inp.isConnected) return comboClose();
+  if (!CB.box) { CB.box = document.createElement('div'); CB.box.className = 'cbox'; document.body.appendChild(CB.box);
+    CB.box.addEventListener('mousedown', e => { e.preventDefault(); const d = e.target.closest('[data-i]'); if (d) CB.pick(+d.dataset.i); }); }
+  const b = inp.getBoundingClientRect();
+  CB.box.style.left = (b.left + window.scrollX) + 'px'; CB.box.style.top = (b.bottom + window.scrollY + 2) + 'px'; CB.box.style.minWidth = Math.max(b.width, 260) + 'px';
+  CB.box.innerHTML = CB.list.length ? CB.list.map((it, i) => `<div data-i="${i}" class="${i === CB.idx ? 'on' : ''}">${esc(it.label)}${it.note ? `<small>${esc(it.note)}</small>` : ''}</div>`).join('')
+    + (CB.more > 0 ? `<div class="none">… ${CB.more} more – keep typing</div>` : '') : `<div class="none">Nothing matches</div>`;
+  CB.box.querySelector('.on')?.scrollIntoView({ block: 'nearest' });
+}
+function comboClose() { CB.box?.remove(); CB.box = null; CB.inp = null; CB.idx = -1; }
+window.addEventListener('resize', () => { comboClose(); fillHide(); });
+
+/* ---------- Excel-style fill handle (machine and product boxes) ---------- */
+const FH = { el: null, src: null, drag: null };
+function fillShow(inp) {
+  if (!FH.el) { FH.el = document.createElement('div'); FH.el.className = 'fillh'; FH.el.title = 'Drag over the lines below (or above) to copy';
+    document.body.appendChild(FH.el); FH.el.addEventListener('pointerdown', fillStart); }
+  FH.src = inp;
+  const b = (inp.closest('.mf') || inp.closest('td')).getBoundingClientRect();
+  FH.el.style.left = (b.right + window.scrollX - 6) + 'px'; FH.el.style.top = (b.bottom + window.scrollY - 6) + 'px'; FH.el.style.display = 'block';
+}
+function fillHide() { if (FH.el) FH.el.style.display = 'none'; FH.src = null; }
+document.addEventListener('focusin', e => { if (FH.el && e.target !== FH.src && !e.target.matches?.('.plantbl input[data-fill]')) fillHide(); });
+function fillCells(tr, f) { return $$(`input[data-fill="${f}"]`, tr).map(i => i.closest('.mf') || i.closest('td')); }
+function fillStart(e) {
+  if (!FH.src || !FH.src.isConnected) return fillHide();
+  e.preventDefault(); comboClose();
+  const tr = FH.src.closest('tr.prow'), tb = tr.closest('tbody'), f = FH.src.dataset.fill;
+  FH.src.dispatchEvent(new Event('change'));          // commit what is typed in the source box first
+  FH.drag = { tr, tb, f, targets: [] };
+  FH.el.setPointerCapture(e.pointerId);
+  const move = ev => {
+    if (ev.clientY > innerHeight - 30) scrollBy(0, 18); else if (ev.clientY < 30) scrollBy(0, -18);
+    const t = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('tr.prow');
+    if (!t || t.parentElement !== tb) return;
+    const rows = $$('tr.prow', tb), i0 = rows.indexOf(tr), i1 = rows.indexOf(t);
+    $$('.fillsel', tb).forEach(x => x.classList.remove('fillsel'));
+    FH.drag.targets = rows.slice(Math.min(i0, i1), Math.max(i0, i1) + 1).filter(x => x !== tr).map(x => ({ tr: x, off: rows.indexOf(x) - i0 }));
+    FH.drag.targets.forEach(x => fillCells(x.tr, f).forEach(c => c.classList.add('fillsel')));
+  };
+  const up = ev => {
+    FH.el.removeEventListener('pointermove', move); FH.el.removeEventListener('pointerup', up); FH.el.removeEventListener('pointercancel', up);
+    const d = FH.drag; FH.drag = null; $$('.fillsel', tb).forEach(x => x.classList.remove('fillsel'));
+    if (ev.type === 'pointerup' && d?.targets.length) fillApply(d, ev.ctrlKey || ev.metaKey);
+  };
+  FH.el.addEventListener('pointermove', move); FH.el.addEventListener('pointerup', up); FH.el.addEventListener('pointercancel', up);
+}
+function fillApply(d, copySame) {
+  const src = PL.rows.find(x => x.key === +d.tr.dataset.key), f = d.f;
+  let n = 0;
+  for (const t of d.targets) {
+    const r = PL.rows.find(x => x.key === +t.tr.dataset.key); if (!r) continue; r.text ||= {};
+    if (f === 'product') { r.product = src.product; r.text.product = src.text?.product || ''; }
+    else {
+      const fd = mfields(r).find(x => x.f === f); if (!fd) continue;
+      const mc = S.m.machineBy[src[f]];
+      if (!mc) { r[f] = ''; r.text[f] = src.text?.[f] || ''; }
+      else {
+        const list = planMachinesIn(fd.dept); let i = list.findIndex(m => m.code === mc.code); if (i < 0) continue;
+        if (!copySame) i += t.off;              // like Excel: Wrapping M/C 16 → 17 → 18 (Ctrl = copy the same machine)
+        const m = list[i]; if (!m) continue;
+        r[f] = m.code; r.text[f] = '';
+      }
+    }
+    if (r.auto) r.out = rowDefault(r);
+    n++;
+  }
+  if (!n) return;
+  PL.dirty = true;
+  drawPlan();
+  toast(`Copied to ${n} line${n === 1 ? '' : 's'}`);
+}
+
+// live calculations: unit, expected, unaccounted hours, section totals, cooked vs wrapped
 function refreshPlanCalcs() {
   const sh = shiftHours(S.ctx.shift);
   const used = {};
-  for (const r of PL.rows) if (r.machine) used[r.machine] = (used[r.machine] || 0) + (num(r.hrs) || 0) + (num(r.co) || 0);
+  for (const r of PL.rows) for (const l of rowLines(r)) used[l.machine] = (used[l.machine] || 0) + (num(r.hrs) || 0) + (num(r.co) || 0);
   const tot = {};
   for (const r of PL.rows) {
-    const tr = $(`tr.prow[data-key="${r.key}"]`);
-    const mc = S.m.machineBy[r.machine], p = S.m.productBy[r.product];
-    r.unit = p?.uom || mc?.unit || '';
-    r.expected = planExpected(mc, p, num(r.hrs));
-    r.unacc = mc ? r2(sh - used[r.machine]) : null;
-    const sec = sectionOf(r); const t = tot[sec] ||= { lines: 0, out: 0, exp: 0, units: new Set() };
-    if (mc) { t.lines++; t.out += num(r.out) || 0; t.exp += r.expected; if (r.unit) t.units.add(r.unit.toUpperCase()); }
+    const tr = $(`tr.prow[data-key="${r.key}"]`), p = S.m.productBy[r.product], fs = mfields(r);
+    r.calc = {}; r.unit = '';
+    for (const x of fs) { const mc = S.m.machineBy[r[x.f]]; if (!mc) continue;
+      r.calc[x.f] = { unit: p?.uom || mc.unit || '', expected: planExpected(mc, p, num(r.hrs)), unacc: r2(sh - used[mc.code]) };
+      r.unit ||= r.calc[x.f].unit; }
+    for (const l of rowLines(r)) { const mc = S.m.machineBy[l.machine]; if (!mc) continue;
+      const t = tot[mc.department] ||= { lines: 0, out: 0, exp: 0, units: new Set() };
+      t.lines++; t.out += num(l.out) || 0; t.exp += r.calc[l.f].expected; if (r.calc[l.f].unit) t.units.add(r.calc[l.f].unit.toUpperCase()); }
     if (!tr) continue;
     $('.u', tr).textContent = r.unit;
-    $('.e', tr).textContent = mc ? fmt(r.expected) : '';
-    const ua = $('.ua', tr); ua.textContent = r.unacc == null ? '' : fmt(r.unacc, 2); ua.classList.toggle('neg', r.unacc != null && r.unacc < 0);
-    ua.title = r.unacc < 0 ? `${mc.name} is planned for ${fmt(used[r.machine], 2)} h – longer than the ${sh} h shift` : '';
+    const se = $$('.e .sub', tr), su = $$('.ua .sub', tr);
+    fs.forEach((x, i) => { const c = r.calc[x.f], mc = S.m.machineBy[r[x.f]];
+      if (se[i]) se[i].textContent = c ? fmt(c.expected) : '';
+      if (su[i]) { su[i].textContent = c ? fmt(c.unacc, 2) : ''; su[i].classList.toggle('neg', !!c && c.unacc < 0);
+        su[i].title = c && c.unacc < 0 ? `${mc.name} is planned for ${fmt(used[mc.code], 2)} h – longer than the ${sh} h shift` : ''; } });
   }
-  for (const [sec, t] of Object.entries(tot)) { const el = $(`[data-sum="${CSS.escape(sec)}"]`); if (el) el.textContent = `· ${t.lines} line(s) · planned ${fmt(t.out)} · expected ${fmt(t.exp)} ${[...t.units].join('/')}`; }
+  // Cooking total = cookers only (the Uniplast and cooling conveyor carry the same output, so it isn't added three times)
+  for (const [sec, t] of Object.entries(tot)) { const el = $(`[data-sum="${CSS.escape(sec)}"]`);
+    if (el) el.textContent = `· ${t.lines} ${sec === 'Cooking' ? 'cooker' : 'machine line'}(s) · planned ${fmt(t.out)} · expected ${fmt(t.exp)} ${[...t.units].join('/')}`; }
   drawCookedVsWrapped();
 }
 // Cooked vs wrapped by product family (name before COOKED / WRAPPED), as in the Planning Template summary
@@ -1510,11 +1957,11 @@ function productFamily(desc) {
 function drawCookedVsWrapped() {
   const box = $('#pCvW'); if (!box) return;
   const fam = {};
-  for (const r of PL.rows) {
-    const mc = S.m.machineBy[r.machine], p = S.m.productBy[r.product]; if (!mc || !p) continue;
+  for (const r of PL.rows) for (const l of rowLines(r)) {
+    const mc = S.m.machineBy[l.machine], p = S.m.productBy[r.product]; if (!mc || !p) continue;
     const kind = mc.department === 'Cooking' ? 'cooked' : mc.department === 'Wrapping' ? 'wrapped' : null; if (!kind) continue;
     const f = productFamily(p.description) || p.description; const x = fam[f] ||= { cooked: 0, wrapped: 0 };
-    x[kind] += num(r.out) || 0;
+    x[kind] += num(l.out) || 0;
   }
   const rows = Object.entries(fam).sort((a, b) => b[1].cooked - a[1].cooked || b[1].wrapped - a[1].wrapped);
   if (!rows.length) { box.innerHTML = `<div class="panel muted small">Nothing planned on cookers or wrapping machines yet.</div>`; return; }
@@ -1538,44 +1985,59 @@ async function copyPlan() {
   if (error) return fail(error, 'Copying plan');
   if (!data.length) return planMsg(`There is no plan for ${niceDate(d)} ${sh} to copy.`, 'warn');
   const sameLen = shiftHours(sh) === shiftHours(S.ctx.shift);
-  PL.rows = data.filter(r => S.m.machineBy[r.machine_code]?.active).map(r => ({ key: ++PL.seq, id: null, machine: r.machine_code, product: r.product_code || '',
-    hrs: sameLen ? r.planned_hrs : null, co: sameLen ? r.changeover_hrs : null, out: sameLen ? r.planned_output : null, auto: !sameLen }));
-  PL.dirty = true;
+  const cp = planRowsFrom(data.filter(r => S.m.machineBy[r.machine_code]?.active), false, sameLen);   // cooking groups found on the original hours/output
+  PL.rows = cp.rows;
+  PL.dirty = true; PL.date = S.ctx.date; PL.shift = S.ctx.shift;
   drawPlan();
-  planMsg(`Copied ${PL.rows.length} line(s) from ${niceDate(d)} ${sh}.${sameLen ? '' : ` That shift is a different length, so enter the running and cleaning hours – planned output fills in.`} Check them and press <b>Save plan</b> – nothing is saved yet.`);
+  const loose = PL.rows.filter(r => r.kind === 'single' && ['Forming', 'Cooling'].includes(sectionOf(r))).length;
+  planMsg(`Copied ${PL.rows.length} line(s) from ${niceDate(d)} ${sh}${cp.groups ? `, including ${cp.groups} cooking line(s) (cooker + Uniplast + cooling)` : ''}.${loose ? ` ${loose} Uniplast / cooling line(s) didn't match a cooker and show as <b>Not grouped</b> in Cooking.` : ''}${sameLen ? '' : ` That shift is a different length, so enter the running and cleaning hours – planned output fills in.`} Check them and press <b>Save plan</b> – nothing is saved yet.`);
 }
 
 async function savePlan() {
   const sh = shiftHours(S.ctx.shift), { date, shift } = S.ctx;
   const errs = [], warns = [], keep = [];
-  $$('tr.prow td').forEach(td => { td.classList.remove('bad'); td.title = ''; });
+  comboClose();
+  $$('tr.prow td, tr.prow .mf').forEach(el => { el.classList.remove('bad'); el.title = ''; });
+  refreshPlanCalcs();
   for (const r of PL.rows) {
-    const tr = $(`tr.prow[data-key="${r.key}"]`);
+    const tr = $(`tr.prow[data-key="${r.key}"]`), fs = mfields(r);
+    const texts = Object.fromEntries(fs.map(x => [x.f, (tr && $(`.mf[data-f="${x.f}"] input`, tr)?.value.trim()) || '']));
     const prodText = (tr && $('[data-k=product] input', tr)?.value.trim()) || '';
-    const blank = !r.machine && !prodText && !r.hrs && !r.co && (r.auto || !r.out);
+    const blank = fs.every(x => !texts[x.f]) && !prodText && !r.hrs && !r.co && (r.auto || !r.out);
     if (blank && !r.id) continue;
-    const bad = [], mark = (k, why) => { bad.push(why); const td = tr && $(`[data-k=${k}]`, tr); if (td) { td.classList.add('bad'); td.title = why; } };
-    const mc = S.m.machineBy[r.machine];
+    const bad = [], mark = (k, why) => { bad.push(why);
+      const el = tr && (fs.some(x => x.f === k) ? $(`.mf[data-f="${k}"]`, tr) : $(`[data-k=${k}]`, tr)); if (el) { el.classList.add('bad'); el.title = why; } };
+    const mcs = [];
+    for (const x of fs) {
+      const what = x.label || 'Machine', mc = S.m.machineBy[r[x.f]];
+      if (!texts[x.f]) { if (!x.optional) mark(x.f, `${what} is required`); }
+      else if (!mc || mc.department !== x.dept || mc.name !== texts[x.f]) mark(x.f, `${what} not recognised – pick it from the list`);
+      else mcs.push(mc);
+    }
+    if (r.kind === 'wrap' && r.machine && r.m2 && r.machine === r.m2) mark('m2', 'Machine 2 is the same as Machine 1');
     const pcode = prodText ? productFromLabel(prodText) : null;
-    if (!mc) mark('machine', 'Machine is required');
-    if (mc && needsProduct(mc) && !prodText) mark('product', 'Product is required');
+    const needs = mcs.length ? mcs.some(needsProduct) : !!STAGES_BY_SECTION[sectionOf(r)];
+    if (needs && !prodText) mark('product', 'Product is required');
     else if (prodText && pcode === undefined) mark('product', 'Product not recognised – pick it from the list');
-    else if (mc && pcode) { const se = productStageError(mc, pcode); if (se) mark('product', se); }
+    else if (pcode) { const se = mcs.map(mc => productStageError(mc, pcode)).find(Boolean); if (se) mark('product', se); }
     const hrs = num(r.hrs), co = num(r.co), out = num(r.out);
     if (hrs === null) mark('hrs', 'Running hours are required');
     else if (Number.isNaN(hrs) || hrs < 0 || hrs > 13) mark('hrs', 'Running hours must be a number from 0 to 13');
     if (Number.isNaN(co) || co < 0 || co > 13) mark('co', 'Cleaning hours must be a number from 0 to 13');
     if (out === null) mark('out', 'Planned output is required');
     else if (Number.isNaN(out) || out < 0) mark('out', 'Planned output must be a number (0 or more)');
-    if (bad.length) { errs.push(`<b>${esc(mc?.name || ((sectionOf(r) || '') + ' line'))}:</b> ${bad.map(esc).join(' · ')}`); continue; }
-    keep.push({ r, rec: { plan_date: date, shift, machine_code: mc.code, product_code: pcode || null, planned_hrs: hrs, changeover_hrs: co || 0, planned_output: out,
-      unit: r.unit || null, expected_output: planExpected(mc, S.m.productBy[pcode], hrs), unaccounted_hrs: r.unacc } });
+    if (bad.length) { errs.push(`<b>${esc(rowName(r))}:</b> ${bad.map(esc).join(' · ')}`); continue; }
+    for (const l of rowLines(r)) {
+      const mc = S.m.machineBy[l.machine], c = r.calc[l.f];
+      keep.push({ r, id: l.id, rec: { plan_date: date, shift, machine_code: mc.code, product_code: pcode || null, planned_hrs: hrs, changeover_hrs: co || 0,
+        planned_output: l.out, unit: c.unit || null, expected_output: planExpected(mc, S.m.productBy[pcode], hrs), unaccounted_hrs: c.unacc } });
+    }
   }
   const btn = $('#pSave');
   const resetBtn = () => { btn.dataset.force = ''; btn.textContent = 'Save plan'; btn.classList.replace('warn', 'primary'); };
   if (errs.length) { resetBtn(); return planMsg(`Fix these before saving:<br>${errs.join('<br>')}`, 'err'); }
   // soft checks – press again to save anyway
-  const over = [...new Set(keep.filter(k => k.r.unacc < 0).map(k => S.m.machineBy[k.rec.machine_code].name))];
+  const over = [...new Set(keep.filter(k => k.rec.unaccounted_hrs < 0).map(k => S.m.machineBy[k.rec.machine_code].name))];
   if (over.length) warns.push(`Planned longer than the ${sh} h shift: ${over.map(esc).join(', ')}.`);
   const seen = {}, dup = [];
   for (const k of keep) { const key = k.rec.machine_code + '|' + k.rec.product_code; if (seen[key]) dup.push(S.m.machineBy[k.rec.machine_code].name); seen[key] = 1; }
@@ -1587,28 +2049,32 @@ async function savePlan() {
   resetBtn();
   // inserts / updates (only lines that changed) / deletes
   const same = (a, b) => { const n = v => v == null || v === '' ? null : (isNaN(+v) ? v : +v); return n(a) === n(b); };
-  const keptIds = new Set(keep.filter(k => k.r.id).map(k => k.r.id));
+  const keptIds = new Set(keep.filter(k => k.id).map(k => Number(k.id)));
   const dels = Object.keys(PL.orig).map(Number).filter(id => !keptIds.has(id));
-  const ins = keep.filter(k => !k.r.id).map(k => k.rec);
-  const ups = keep.filter(k => k.r.id && ['machine_code', 'product_code', 'planned_hrs', 'changeover_hrs', 'planned_output', 'unit', 'expected_output', 'unaccounted_hrs']
-    .some(f => !same(PL.orig[k.r.id][f], k.rec[f])));
+  const ins = keep.filter(k => !k.id).map(k => k.rec);
+  const ups = keep.filter(k => k.id && ['machine_code', 'product_code', 'planned_hrs', 'changeover_hrs', 'planned_output', 'unit', 'expected_output', 'unaccounted_hrs']
+    .some(f => !same(PL.orig[k.id][f], k.rec[f])));
   if (!dels.length && !ins.length && !ups.length) { PL.dirty = false; return planMsg('No changes to save.'); }
   btn.disabled = true; btn.textContent = 'Saving…';
   const results = [];
   if (dels.length) results.push(await sb.from('plan_lines').delete().in('id', dels));
-  results.push(...await Promise.all(ups.map(k => { const { plan_date, shift: s, ...chg } = k.rec; return sb.from('plan_lines').update(chg).eq('id', k.r.id); })));
+  results.push(...await Promise.all(ups.map(k => { const { plan_date, shift: s, ...chg } = k.rec; return sb.from('plan_lines').update(chg).eq('id', k.id); })));
   if (ins.length) results.push(await sb.from('plan_lines').insert(ins));
   btn.disabled = false; btn.textContent = 'Save plan';
   const bad = results.find(x => x.error);
-  if (bad) { fail(bad.error, 'Saving plan'); return loadPlan(); }
+  if (bad) { fail(bad.error, 'Saving plan'); PL.dirty = false; return loadPlan(); }
   toast(`Plan saved – ${ins.length} added, ${ups.length} changed, ${dels.length} removed`, 'ok');
+  PL.dirty = false;
   await loadPlan();
 }
 
 function exportPlan() {
-  const rows = PL.rows.filter(r => S.m.machineBy[r.machine]).map(r => ({ Date: S.ctx.date, Shift: S.ctx.shift, Section: sectionOf(r), Machine: S.m.machineBy[r.machine].name,
-    'Product code': r.product || '', Product: S.m.productBy[r.product]?.description || '', 'Running hours': num(r.hrs), 'Cleaning/changeover hours': num(r.co),
-    'Planned output': num(r.out), Unit: r.unit, 'Expected output': r.expected, 'Unaccounted hours': r.unacc}));
+  refreshPlanCalcs();
+  const rows = [];
+  for (const r of PL.rows) for (const l of rowLines(r)) { const mc = S.m.machineBy[l.machine]; if (!mc) continue; const c = r.calc[l.f];
+    rows.push({ Date: S.ctx.date, Shift: S.ctx.shift, Section: mc.department, Machine: mc.name,
+      'Product code': r.product || '', Product: S.m.productBy[r.product]?.description || '', 'Running hours': num(r.hrs), 'Cleaning/changeover hours': num(r.co),
+      'Planned output': num(l.out), Unit: c.unit, 'Expected output': c.expected, 'Unaccounted hours': c.unacc }); }
   if (!rows.length) return toast('Nothing to export');
   const ws = XLSX.utils.json_to_sheet(rows), wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Plan'); XLSX.writeFile(wb, `KSL Plan ${S.ctx.date} ${S.ctx.shift}.xlsx`);
@@ -1620,7 +2086,7 @@ function exportPlan() {
 async function renderUsers() {
   $('#app').innerHTML = `<div class="hint"><b>Adding someone:</b> Supabase → Authentication → Users → <b>Add user → Create new user</b>. Type their email and a <b>temporary password</b>, tick <b>Auto Confirm User</b>, and give them the temporary password. They appear here as <b>pending</b> – give them a role and press Save. The first time they log in, the app makes them choose their own password.<br>
     <b>Forgotten password:</b> they press <i>Forgot your password?</i> on the log-in screen and get an email link. If they can't get email, set them a temporary password below.<br>
-    <b>Clerk</b>: Bulk entry only; can correct their own entries and Mobile data clerks' entries ·
+    <b>Clerk</b>: Bulk entry and SAP summary; can correct their own entries and Mobile data clerks' entries ·
     <b>Mobile data clerk</b>: Bulk entry only; own entries only ·
     <b>Shift supervisor</b>: Planning (full), OEE (view) ·
     <b>Planner</b>: Planning, OEE, Stoppages · <b>Manager</b>: OEE and Planning, view only · <b>Admin</b>: everything.</div><div id="uBody" class="muted">Loading…</div>`;
