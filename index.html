@@ -358,8 +358,8 @@ const hhmm = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
 /* ---------- roles ---------- */
 //   clerk        – Bulk entry + SAP summary; corrects own entries and Mobile data clerks' entries
 //   mobile_clerk – Bulk entry only; corrects own entries only
-//   supervisor   – Shift supervisor: Planning (full), OEE (view); no output/stoppage entry
-//   manager      – OEE and Planning, view only
+//   supervisor   – Shift supervisor: Planning (full), OEE + Output summary (view); no output/stoppage entry
+//   manager      – OEE, Output summary and Planning, view only
 //   planner      – Planning + reports;  admin – everything
 // The database (10_roles_and_groups.sql) enforces the same rules.
 const CAN = {
@@ -370,6 +370,7 @@ const CAN = {
   oee: r => ['supervisor', 'planner', 'manager', 'admin'].includes(r),
   stops: r => ['planner', 'admin'].includes(r),
   stores: r => ['supervisor', 'planner', 'admin'].includes(r),
+  fg: r => ['supervisor', 'manager', 'admin'].includes(r),
   sap: r => ['clerk', 'admin'].includes(r),
   users: r => r === 'admin',
 };
@@ -382,6 +383,7 @@ const VIEWS = [
   { id: 'plan', label: 'Planning', can: CAN.planView, render: renderPlan },
   { id: 'stores', label: 'Stores issue', can: CAN.stores, render: renderStores },
   { id: 'oee', label: 'OEE', can: CAN.oee, render: renderOEE },
+  { id: 'fg', label: 'Output summary', can: CAN.fg, render: renderFG },
   { id: 'stops', label: 'Stoppages', can: CAN.stops, render: renderStops },
   { id: 'users', label: 'Users', can: CAN.users, render: renderUsers },
 ];
@@ -635,8 +637,14 @@ async function afterLogin(user, opts = {}) {
 function route() {
   const role = S.profile.role;
   const allowed = VIEWS.filter(v => v.can(role));
-  let id = location.hash.slice(1);
+  let [id, qs] = location.hash.slice(1).split('?');
   if (!allowed.find(v => v.id === id)) id = allowed[0].id;
+  // Link from the Daily OEE email: #oee?d=2026-11-18 opens that day, 24H
+  const linkDate = new URLSearchParams(qs || '').get('d');
+  if (id === 'oee' && /^\d{4}-\d{2}-\d{2}$/.test(linkDate || '')) {
+    S.ctx.date = linkDate; oeeView = 'Day'; oeePeriod = '24H';
+    history.replaceState(null, '', location.pathname + location.search + '#oee');
+  }
   $('#nav').innerHTML = allowed.map(v => `<a href="#${v.id}" class="${v.id === id ? 'active' : ''}">${v.label}</a>`).join('');
   if (S.leave) { const f = S.leave; S.leave = null; try { f(); } catch (e) { console.error('Keeping unsaved values', e); } }
   S.view = id;
@@ -1116,11 +1124,13 @@ function renderOEE() {
   loadOEE();
 }
 // [key, heading (\n = line break), decimals or 'p' for %]
+// Heading text on screen: \n = new line. Export uses the same words on one line (xlLabel).
 const OEE_COLS = [
-  ['planned_hrs', 'Planned\nhours', 1], ['breakdown_hrs', 'Breakdown\nhours', 2], ['planned_output', 'Planned\noutput', 0], ['theoretical_output', 'After\nbreakdowns', 0],
-  ['actual_output', 'Actual\noutput', 0], ['plan_accuracy', 'Plan\nadherence', 'p'], ['availability', 'Avail­ability', 'p'],
-  ['efficiency', 'Effic­iency', 'p'], ['quality', 'Quality', 'p'], ['oee', 'OEE', 'p'],
-  ['utilisation', 'Utili­sation', 'p'], ['teep', 'TEEP', 'p'], ['sweet_scrap_pct', 'Sweet\nscrap %', 'p']];
+  ['planned_hrs', 'Planned\nhours', 1], ['breakdown_hrs', 'Break\ndown\nhours', 2], ['planned_output', 'Planned\noutput', 0], ['theoretical_output', 'After\nbreak\ndowns', 0],
+  ['actual_output', 'Actual\noutput', 0], ['plan_accuracy', 'Plan\nadherence', 'p'], ['availability', 'Availability', 'p'],
+  ['efficiency', 'Efficiency', 'p'], ['quality', 'Quality', 'p'], ['oee', 'OEE', 'p'],
+  ['utilisation', 'Utilisation', 'p'], ['teep', 'TEEP', 'p'], ['sweet_scrap_pct', 'Sweet\nscrap %', 'p']];
+const xlLabel = l => l.replace(/break\ndown/gi, m => m.replace('\n', '')).replace(/\n|\u00ad/g, m => m === '\n' ? ' ' : '');
 const SUM_KEYS = ['planned_hrs', 'breakdown_min', 'planned_output', 'expected_output', 'actual_output', 'sweet_scrap_kg', 'wrapper_waste_eq', 'quality_base', 'plan_abs_diff', 'ab'];
 // totals first, then ratios from the totals (used for machines over several days and for group rows)
 function sumRatios(rows, hrs) {
@@ -1349,7 +1359,7 @@ function exportOEE() {
   const R = S.oeeRange;
   const out = S.oeeRows.filter(r => !r.idle).map(r => {
     const o = { Period: R.label, From: R.from, To: R.to, Shift: oeePeriod, Machine: r.machine_name, Group: r.group_code, Section: r.department };
-    OEE_COLS.forEach(([k, l, d]) => { const v = r[k]; o[l.replace(/\n|­/g, m => m === '\n' ? ' ' : '')] = v == null ? null : Math.round(v * (d === 'p' ? 10000 : 100)) / (d === 'p' ? 10000 : 100); });
+    OEE_COLS.forEach(([k, l, d]) => { const v = r[k]; o[xlLabel(l)] = v == null ? null : Math.round(v * (d === 'p' ? 10000 : 100)) / (d === 'p' ? 10000 : 100); });
     o.Exceptions = [r.mnp && 'Made not planned' + (r.mnp > 1 ? ` (${r.mnp} shifts)` : ''), r.pnm && 'Planned not made' + (r.pnm > 1 ? ` (${r.pnm} shifts)` : ''),
       r.over_105pct && '>105%', r.below_low_limit && 'Below limit', r.quality_below_limit && 'Quality below limit'].filter(Boolean).join(', ');
     return o; });
@@ -1358,7 +1368,7 @@ function exportOEE() {
   for (const r of S.oeeRows.filter(r => !r.idle)) for (const p of S.oeeProd?.[r.key] || []) {
     const o = { Period: R.label, From: R.from, To: R.to, Shift: oeePeriod, Machine: r.machine_name, Group: r.group_code, Section: r.department,
       'Product code': p.product_code, Product: p.product_name, 'Expected output': round(p.expected_output, 0) };
-    OEE_COLS.forEach(([k, l, d]) => { o[l.replace(/\n|\u00ad/g, m => m === '\n' ? ' ' : '')] = round(p[k], d); });
+    OEE_COLS.forEach(([k, l, d]) => { o[xlLabel(l)] = round(p[k], d); });
     o.Exceptions = [p.mnp && 'Made not planned', p.pnm && 'Planned not made', p.over_105pct && '>105%', p.below_low_limit && 'Below limit', p.quality_below_limit && 'Quality below limit'].filter(Boolean).join(', ');
     byProd.push(o);
   }
@@ -1366,6 +1376,183 @@ function exportOEE() {
   XLSX.utils.book_append_sheet(wb, ws, 'OEE');
   if (byProd.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byProd), 'By product');
   XLSX.writeFile(wb, `KSL OEE ${R.file} ${oeePeriod}.xlsx`);
+}
+
+/* =========================================================
+   OUTPUT SUMMARY (Admin, Shift supervisor, Manager)
+   Replaces the "Finished Goods Total Output by" tab of Production Data 2022 V1:
+   output kg per section per month or week of one calendar year (Jan–Dec).
+   Kg as in the sheet: quantity × product nett weight, or the quantity itself when the
+   product has no nett weight. TOTAL = Packaging + White Mint + Manual (finished goods).
+   Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap kg, all machines.
+   Weeks: Monday–Sunday, cut at 1 Jan and 31 Dec (week 1 = 1 Jan to the first Sunday).
+   ========================================================= */
+const FG_SECS = ['Cooking', 'Wrapping', 'Packaging', 'White Mint', 'Manual'];
+const FG_FG = ['Packaging', 'White Mint', 'Manual'];
+const FG_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const FG = { year: null, view: 'Month', prods: new Set(), cache: {}, rows: null, firstYear: null, q: '' };
+const fgKg = o => { const nw = +S.m.productBy[o.product_code]?.nett_weight || 0; const q = +o.qty || 0; return nw > 0 ? q * nw : q; };
+function fgWeek(d) {           // Monday–Sunday week number inside the calendar year, cut at 1 Jan
+  const y = d.slice(0, 4), jan1 = utc(y + '-01-01'), off = (jan1.getUTCDay() + 6) % 7;   // 0 = Monday
+  return Math.floor(((utc(d) - jan1) / 864e5 + off) / 7) + 1;
+}
+function fgWeekRange(y, w) {
+  const jan1 = utc(y + '-01-01'), off = (jan1.getUTCDay() + 6) % 7;
+  let from = isoD(new Date(jan1.getTime() + ((w - 1) * 7 - off) * 864e5)), to = addDays(from, 6);
+  if (from < y + '-01-01') from = y + '-01-01';
+  if (to > y + '-12-31') to = y + '-12-31';
+  return { from, to };
+}
+const fgShort = d => new Date(d + 'T00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+async function renderFG() {
+  const thisYear = +kenyaToday().slice(0, 4);
+  if (!FG.year) FG.year = thisYear;
+  if (FG.firstYear == null) {
+    const { data, error } = await sb.from('output_entries').select('prod_date').order('prod_date').limit(1);
+    if (error) fail(error, 'Finding the first year');
+    FG.firstYear = Math.min(thisYear, data?.[0] ? +data[0].prod_date.slice(0, 4) : thisYear);
+    if (S.view !== 'fg') return;
+  }
+  const years = []; for (let y = thisYear; y >= FG.firstYear; y--) years.push(y);
+  $('#app').innerHTML = `<div class="hint">Output in kg per section, by month or week, for one year (January to December), as in the
+      "Finished Goods Total Output" sheet. TOTAL = Packaging + White Mint + Manual (finished goods).
+      Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap in kg from all machines.</div>
+    <div class="toolbar">
+      <div class="field"><label for="fgYear">Year</label><select id="fgYear">${years.map(y => `<option ${y === FG.year ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
+      <div class="field"><label for="fgView">View</label><select id="fgView">${['Month', 'Week'].map(v => `<option value="${v}" ${v === FG.view ? 'selected' : ''}>${v === 'Month' ? 'Monthly' : 'Weekly'}</option>`).join('')}</select></div>
+      <div class="field" style="position:relative;min-width:260px"><label for="fgProdBtn">Products</label>
+        <button type="button" class="btn" id="fgProdBtn" style="text-align:left;font-weight:500" aria-expanded="false"></button>
+        <div id="fgProdBox" class="cbox hidden" style="top:100%;left:0;width:min(92vw,460px);max-height:none;padding:8px"></div></div>
+      <button class="btn" id="fgRefresh" type="button">Refresh</button>
+      <button class="btn" id="fgExport" type="button">Export to Excel</button>
+    </div><div id="fgBody"><div class="muted">Loading…</div></div>`;
+  $('#fgYear').onchange = e => { FG.year = +e.target.value; loadFG(); };
+  $('#fgView').onchange = e => { FG.view = e.target.value; drawFG(); };
+  $('#fgRefresh').onclick = () => { delete FG.cache[FG.year]; loadFG(); };
+  $('#fgExport').onclick = exportFG;
+  $('#fgProdBtn').onclick = () => fgProdOpen($('#fgProdBox').classList.contains('hidden'));
+  document.addEventListener('mousedown', fgOutside);
+  S.leave = () => document.removeEventListener('mousedown', fgOutside);
+  fgProdLabel();
+  loadFG();
+}
+function fgOutside(e) { const box = $('#fgProdBox'); if (box && !box.classList.contains('hidden') && !e.target.closest('#fgProdBox,#fgProdBtn')) fgProdOpen(false); }
+function fgProdLabel() {
+  const b = $('#fgProdBtn'); if (!b) return;
+  const n = FG.prods.size, one = n === 1 ? S.m.productBy[[...FG.prods][0]] : null;
+  b.textContent = !n ? 'All products ▾' : n === 1 ? `${[...FG.prods][0]} ${one?.description || ''} ▾` : `${n} products selected ▾`;
+  b.title = [...FG.prods].map(c => `${c} ${S.m.productBy[c]?.description || ''}`).join('\n');
+}
+// Products to choose from: every product with output in the year, plus any already selected
+function fgProdList() {
+  const data = FG.cache[FG.year] || [], codes = new Set(data.map(o => o.product_code).filter(Boolean));
+  FG.prods.forEach(c => codes.add(c));
+  return [...codes].map(c => ({ code: c, name: S.m.productBy[c]?.description || c, stage: S.m.productBy[c]?.stage || '' }))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code));
+}
+function fgProdOpen(open) {
+  const box = $('#fgProdBox'); if (!box) return;
+  box.classList.toggle('hidden', !open); $('#fgProdBtn').setAttribute('aria-expanded', open);
+  if (!open) return;
+  box.innerHTML = `<input id="fgProdQ" type="search" placeholder="Search code or name…" autocomplete="off" value="${esc(FG.q)}">
+    <div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap"><button type="button" class="btn sm" id="fgSelShown">Tick all shown</button>
+      <button type="button" class="btn sm" id="fgClear">Clear (all products)</button><span class="muted small" id="fgProdN" style="align-self:center"></span></div>
+    <div id="fgProdItems" style="max-height:320px;overflow:auto;border-top:1px solid var(--line2)"></div>`;
+  const q = $('#fgProdQ');
+  q.oninput = () => { FG.q = q.value; fgProdItems(); };
+  $('#fgSelShown').onclick = () => { fgShown().forEach(p => FG.prods.add(p.code)); fgProdChanged(); };
+  $('#fgClear').onclick = () => { FG.prods.clear(); fgProdChanged(); };
+  fgProdItems(); q.focus();
+}
+function fgShown() {
+  const words = FG.q.toLowerCase().split(/\s+/).filter(Boolean);
+  return fgProdList().filter(p => words.every(w => (p.code + ' ' + p.name).toLowerCase().includes(w)));
+}
+function fgProdItems() {
+  const list = fgShown(), el = $('#fgProdItems'); if (!el) return;
+  el.innerHTML = list.length ? list.map(p => `<label style="display:flex;gap:8px;align-items:center;padding:5px 4px;cursor:pointer;border-bottom:1px solid var(--line2);text-transform:none;letter-spacing:normal;font-weight:400;font-size:14px;color:var(--ink)">
+      <input type="checkbox" data-c="${esc(p.code)}" ${FG.prods.has(p.code) ? 'checked' : ''} style="width:auto;min-height:0">
+      <span><span class="mono small">${esc(p.code)}</span> ${esc(p.name)} <span class="muted small">${esc(p.stage)}</span></span></label>`).join('')
+    : `<div class="muted small" style="padding:8px 4px">No products match.</div>`;
+  $$('#fgProdItems input[type=checkbox]').forEach(c => c.onchange = () => { c.checked ? FG.prods.add(c.dataset.c) : FG.prods.delete(c.dataset.c); fgProdChanged(true); });
+  $('#fgProdN').textContent = `${FG.prods.size ? FG.prods.size + ' ticked · ' : ''}${list.length} shown`;
+}
+function fgProdChanged(keepList) { fgProdLabel(); if (!keepList) fgProdItems(); else $('#fgProdN').textContent = `${FG.prods.size ? FG.prods.size + ' ticked · ' : ''}${fgShown().length} shown`; drawFG(); }
+async function loadFG() {
+  const body = $('#fgBody'); if (!body) return;
+  const y = FG.year;
+  if (!FG.cache[y]) {
+    body.innerHTML = `<div class="muted">Loading ${y}…</div>`;
+    try {
+      FG.cache[y] = await fetchAll(() => sb.from('output_entries').select('prod_date,machine_code,product_code,qty,unit,sweet_scrap_kg,material_scrap_kg')
+        .gte('prod_date', `${y}-01-01`).lte('prod_date', `${y}-12-31`).order('id'));
+    } catch (e) { body.innerHTML = ''; return fail(e, 'Loading output'); }
+    if (S.view !== 'fg' || FG.year !== y || $('#fgBody') !== body) return;
+  }
+  if (!$('#fgProdBox')?.classList.contains('hidden')) fgProdItems();
+  drawFG();
+}
+function fgCompute() {
+  const y = FG.year, data = FG.cache[y] || [], today = kenyaToday(), sel = FG.prods.size ? FG.prods : null;
+  const W = FG.view === 'Week';
+  // periods: every month / week of the year, up to today for the current year
+  const last = String(y) === today.slice(0, 4) ? today : `${y}-12-31`;
+  const per = [];
+  if (W) { for (let w = 1; w <= fgWeek(last); w++) { const r = fgWeekRange(y, w); per.push({ key: w, label: `Week ${w}`, ...r }); } }
+  else { for (let m = 1; m <= +last.slice(5, 7); m++) { const mm = String(m).padStart(2, '0'), from = `${y}-${mm}-01`;
+    per.push({ key: m, label: `${FG_MON[m - 1]}-${String(y).slice(2)}`, from, to: isoD(new Date(Date.UTC(y, m, 0))) }); } }
+  const by = Object.fromEntries(per.map(p => [p.key, { ...p, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) }]));
+  let used = 0;
+  for (const o of data) {
+    if (sel && !sel.has(o.product_code)) continue;
+    const r = by[W ? fgWeek(o.prod_date) : +o.prod_date.slice(5, 7)]; if (!r) continue;
+    used++; r.n++;
+    const sec = S.m.machineBy[o.machine_code]?.department;
+    if (FG_SECS.includes(sec)) r[sec] += fgKg(o);
+    r.ss += +o.sweet_scrap_kg || 0; r.ms += +o.material_scrap_kg || 0;
+  }
+  const rows = per.map(p => { const r = by[p.key]; r.total = FG_FG.reduce((a, s) => a + r[s], 0); r.ssPct = r.Cooking > 0 ? r.ss / r.Cooking : null; return r; });
+  const tot = { label: `Total ${y}`, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) };
+  for (const r of rows) { tot.n += r.n; tot.ss += r.ss; tot.ms += r.ms; FG_SECS.forEach(s => tot[s] += r[s]); }
+  tot.total = FG_FG.reduce((a, s) => a + tot[s], 0); tot.ssPct = tot.Cooking > 0 ? tot.ss / tot.Cooking : null;
+  return { rows, tot, used, all: data.length, last };
+}
+function drawFG() {
+  const body = $('#fgBody'); if (!body || !FG.cache[FG.year]) return;
+  const R = fgCompute(); FG.rows = R;
+  const W = FG.view === 'Week', y = FG.year;
+  const kg = v => fmt(v, 0), cell = (r, v) => r.n ? v : '<span class="muted">–</span>';
+  const line = (r, cls = '') => `<tr${cls ? ` class="${cls}"` : ''}><td class="first"><b>${esc(r.label)}</b></td>${W ? `<td class="muted small">${r.from ? `${esc(fgShort(r.from))} – ${esc(fgShort(r.to))}` : ''}</td>` : ''}
+    ${FG_SECS.map(s => `<td class="n">${cell(r, kg(r[s]))}</td>`).join('')}<td class="n"><b>${cell(r, kg(r.total))}</b></td>
+    <td class="n">${cell(r, r.ssPct == null ? '<span class="muted">–</span>' : fmt(r.ssPct * 100, 2) + '%')}</td><td class="n">${cell(r, fmt(r.ms, 1))}</td></tr>`;
+  const selTxt = FG.prods.size ? `${FG.prods.size} product${FG.prods.size === 1 ? '' : 's'} selected` : 'All products';
+  const current = String(y) === kenyaToday().slice(0, 4);
+  body.innerHTML = `<div class="muted small" style="margin-bottom:8px"><b>${y} · ${W ? 'Weekly' : 'Monthly'} · ${esc(selTxt)}</b> · ${R.used.toLocaleString('en-GB')} output entr${R.used === 1 ? 'y' : 'ies'}${current ? ` · up to today (${esc(niceDate(R.last))}); the current ${W ? 'week' : 'month'} is still in progress` : ''}</div>
+    <div class="tablewrap" style="max-width:1100px"><table id="fgTable"><thead><tr><th class="first">${W ? 'Week' : 'Month'}</th>${W ? '<th>Dates</th>' : ''}
+      ${FG_SECS.map(s => `<th class="n">${esc(s)}</th>`).join('')}<th class="n">TOTAL</th><th class="n">Sweet Scrap (%)</th><th class="n">Wrapper Scrap (kg)</th></tr></thead>
+    <tbody>${R.rows.map(r => line(r)).join('')}${line(R.tot, 'tot')}</tbody></table></div>
+    <div class="muted small" style="margin-top:8px">All figures in kg (cartons × nett weight). – = nothing posted for that ${W ? 'week' : 'month'}${FG.prods.size ? ' for the selected products' : ''}.
+      ${FG.prods.size ? 'Each product belongs to one stage, so only the sections that make the selected products have figures. Sweet scrap % = sweet scrap of the selected products ÷ their Cooking kg (– when none of them is cooked). ' : ''}
+      ${W ? 'Weeks run Monday to Sunday; week 1 starts on 1 January and the last week ends on 31 December, so those can be shorter than 7 days.' : ''}</div>`;
+}
+function exportFG() {
+  const R = FG.rows; if (!R) return toast('Nothing to export');
+  const W = FG.view === 'Week', y = FG.year;
+  const products = FG.prods.size ? [...FG.prods].map(c => `${c} ${S.m.productBy[c]?.description || ''}`.trim()).join('; ') : 'All products';
+  const toRow = r => { const o = { [W ? 'Week' : 'Month']: r.label };
+    if (W) { o.From = r.from || null; o.To = r.to || null; }
+    FG_SECS.forEach(s => o[s + ' (kg)'] = r.n ? Math.round(r[s] * 100) / 100 : null);
+    o['TOTAL (kg)'] = r.n ? Math.round(r.total * 100) / 100 : null;
+    o['Sweet Scrap (%)'] = r.n && r.ssPct != null ? Math.round(r.ssPct * 1e6) / 1e6 : null;
+    o['Wrapper Scrap (kg)'] = r.n ? Math.round(r.ms * 100) / 100 : null; return o; };
+  const rows = [...R.rows.map(toRow), toRow(R.tot)];
+  const ws = XLSX.utils.aoa_to_sheet([[`KSL output summary ${y} – ${W ? 'weekly' : 'monthly'}`], [`Products: ${products}`], []]);
+  XLSX.utils.sheet_add_json(ws, rows, { origin: 'A4' });
+  const keys = Object.keys(rows[0]), pc = keys.indexOf('Sweet Scrap (%)');
+  for (let i = 0; i < rows.length; i++) { const a = XLSX.utils.encode_cell({ r: 4 + i, c: pc }); if (ws[a] && typeof ws[a].v === 'number') ws[a].z = '0.00%'; }
+  ws['!cols'] = keys.map((k, i) => ({ wch: i === 0 ? 12 : Math.max(11, k.length + 2) }));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, W ? 'Weekly' : 'Monthly');
+  XLSX.writeFile(wb, `KSL Output summary ${y} ${W ? 'weekly' : 'monthly'}${FG.prods.size ? ' (selected products)' : ''}.xlsx`);
 }
 
 /* =========================================================
