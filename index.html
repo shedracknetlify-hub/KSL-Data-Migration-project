@@ -356,21 +356,21 @@ function confirmBox(title, html, okText = 'OK, save anyway') {
 const hhmm = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
 
 /* ---------- roles ---------- */
-//   clerk        – Bulk entry + SAP summary; corrects own entries and Mobile data clerks' entries
+//   clerk        – Bulk entry + SAP summary + OEE and Output summary (view); corrects own entries and Mobile data clerks' entries
 //   mobile_clerk – Bulk entry only; corrects own entries only
 //   supervisor   – Shift supervisor: Planning (full), OEE + Output summary (view); no output/stoppage entry
 //   manager      – OEE, Output summary and Planning, view only
 //   planner      – Planning + reports;  admin – everything
-// The database (10_roles_and_groups.sql) enforces the same rules.
+// The database (10_roles_and_groups.sql, 17_clerk_oee.sql) enforces the same rules.
 const CAN = {
   entry: r => r === 'admin',
   bulk: r => ['clerk', 'mobile_clerk', 'admin'].includes(r),
   planView: r => ['supervisor', 'planner', 'manager', 'admin'].includes(r),
   plan: r => ['supervisor', 'planner', 'admin'].includes(r),
-  oee: r => ['supervisor', 'planner', 'manager', 'admin'].includes(r),
+  oee: r => ['supervisor', 'planner', 'manager', 'admin', 'clerk'].includes(r),
   stops: r => ['planner', 'admin'].includes(r),
   stores: r => ['supervisor', 'planner', 'admin'].includes(r),
-  fg: r => ['supervisor', 'manager', 'admin'].includes(r),
+  fg: r => ['supervisor', 'manager', 'admin', 'clerk'].includes(r),
   sap: r => ['clerk', 'admin'].includes(r),
   users: r => r === 'admin',
 };
@@ -1156,6 +1156,20 @@ function sumRatios(rows, hrs) {
   o.sweet_scrap_pct = o.actual_output > 0 ? o.sweet_scrap_kg / o.actual_output : null;
   return o;
 }
+// OEE summary by section: groups of these sections are not production (as in the Daily OEE email)
+const OEE_NOT_PRODUCTION = ['Vehicles/Generators', 'Scrap'];
+// Sweet scrap and Recycling for the OEE summary, from the output entries of the period/shift (all sections).
+// Kg as the old OEE sheet / Output summary: quantity × product nett weight, or the quantity when there is no nett weight.
+function oeeScrap(outs) {
+  const r = { ss: 0, recycling: 0, cooking: 0 };
+  for (const o of outs || []) {
+    const dep = S.m.machineBy[o.machine_code]?.department;
+    r.ss += +o.sweet_scrap_kg || 0;
+    if (dep === 'Cooking') r.cooking += fgKg(o);
+    if (dep === 'Scrap') r.recycling += fgKg(o);
+  }
+  return r;
+}
 function band(v, lo, hi) { if (v == null || lo == null) return ''; return v < lo ? 'r' : (hi != null && v >= hi ? 'g' : 'a'); }
 async function fetchAll(build) {     // Supabase returns max 1000 rows per request – page through
   const out = [];
@@ -1208,14 +1222,15 @@ async function loadOEE(silent) {
   const body = $('#oeeBody'); if (!body) return;
   const reopen = silent ? $$('#oeeBody button.tog[aria-expanded="true"]').map(b => b.dataset.m) : [];
   if (!silent) body.innerHTML = `<div class="muted">Loading…</div>`;
-  const R = oeeRange(); S.oeeRange = R;
+  const R = oeeRange(); S.oeeRange = R; S.oeeSummary = null;
   let data;
   try { data = await fetchAll(() => { let q = sb.from('v_oee').select('*').gte('prod_date', R.from).lte('prod_date', R.to).in('shift', oeePeriod === '24H' ? ['Day', 'Night'] : [oeePeriod]);
       if (oeeSection) q = q.eq('department', oeeSection); return q.order('prod_date').order('machine_code'); }); }
   catch (e) { return fail(e, 'Loading OEE'); }
   let plans, outs;
   try { [plans, outs] = await Promise.all([
-      fetchAll(() => { let q = sb.from('plan_lines').select('plan_date,shift,machine_code,product_code,planned_hrs,planned_output,expected_output').gte('plan_date', R.from).lte('plan_date', R.to);
+      // expected output for OEE = the machine's own capacity (v_plan_capacity, 16_efficiency_machine_capacity.sql), not the plan's figure
+      fetchAll(() => { let q = sb.from('v_plan_capacity').select('plan_date,shift,machine_code,product_code,planned_hrs,planned_output,expected_output:capacity_output').gte('plan_date', R.from).lte('plan_date', R.to);
         if (oeePeriod !== '24H') q = q.eq('shift', oeePeriod); return q.order('id'); }),
       fetchAll(() => { let q = sb.from('output_entries').select('prod_date,shift,machine_code,product_code,qty,output_kg,sweet_scrap_kg,material_scrap_kg').gte('prod_date', R.from).lte('prod_date', R.to);
         if (oeePeriod !== '24H') q = q.eq('shift', oeePeriod); return q.order('id'); })]); }
@@ -1279,10 +1294,12 @@ async function loadOEE(silent) {
     return `<td class="n">${b ? `<span class="pill ${b}">${pct(v)}</span>` : pct(v)}</td>`;
   };
   let html = '', allFlags = 0, totalBd = 0, ran = 0;
+  const sumRows = [];       // summary by section (top of the screen): one row per production group
   for (const gk of gKeys) {
     const gr = groups[gk].sort((a, b) => a.machine_name.localeCompare(b.machine_name, undefined, { numeric: true }));
     const g = S.m.groupBy[gk];
     const tot = sumRatios(gr.filter(r => !r.idle), hrs);
+    if (!OEE_NOT_PRODUCTION.includes(gr[0].department)) sumRows.push({ gk, g, tot });
     html += `<tr class="grp"><td class="first">${esc(gk)}${g?.oee_low != null ? ` <span class="muted small" style="font-weight:500">limits ${pct(g.oee_low)}–${pct(g.oee_high)}</span>` : ''}</td>${OEE_COLS.map(c => cell(tot, c, g)).join('')}<td></td></tr>`;
     for (const r of gr) {
       const f = flagsOf(r); if (f) allFlags++; totalBd += (+r.breakdown_min || 0); if (+r.actual_output > 0) ran++;
@@ -1295,13 +1312,24 @@ async function loadOEE(silent) {
     }
   }
   const hdr = l => esc(l).replace(/\n/g, '<br>');
-  body.innerHTML = liveBox + `<div class="kpis">
+  const SC = oeeScrap(outs); S.oeeSummary = { rows: sumRows, scrap: SC };
+  const kgTxt = v => fmt(v, 1), ofCk = v => SC.cooking > 0 ? `${fmt(v / SC.cooking * 100, 2)}% of Cooking` : '<span class="muted">no Cooking output</span>';
+  const summary = `<h3 style="margin:4px 0 8px">Summary by section</h3>
+    <div class="tablewrap"><table class="oee" id="oeeSummary"><thead><tr><th class="first">Section</th>${OEE_COLS.map(c => `<th class="n${c[0] === 'actual_output' ? ' act' : ''}">${hdr(c[1])}</th>`).join('')}</tr></thead>
+      <tbody>${sumRows.map(({ gk, g, tot }) => `<tr><td class="first"><b>${esc(gk)}</b></td>${OEE_COLS.map(c => cell(tot, c, g)).join('')}</tr>`).join('')}</tbody></table></div>
+    <div class="tablewrap" style="max-width:560px;margin-top:8px"><table id="oeeScrap"><tbody>
+      <tr><td class="first"><b>Total Sweet Scrap (kg)</b></td><td class="n"><b>${kgTxt(SC.ss)}</b></td><td class="n">${ofCk(SC.ss)}</td></tr>
+      <tr><td class="first"><b>Total Recycling (kg)</b></td><td class="n"><b>${kgTxt(SC.recycling)}</b></td><td class="n">${ofCk(SC.recycling)}</td></tr>
+    </tbody></table></div>
+    <div class="muted small" style="margin:6px 0 14px">Section rows = totals of their machines, worked out as in the machine table below (Recycling and Vehicles/Generators left out). Sweet scrap = sweet scrap posted on all machines; Recycling = output posted on the Scrap section (Recycling); both as % of Cooking output in kg (cartons × nett weight), for ${esc(R.label)} · ${oeePeriod}${oeeSection ? `, all sections (not only ${esc(oeeSection)})` : ''}${L ? ', posted so far' : ''}.</div>
+    <h3 style="margin:4px 0 8px">Machines</h3>`;
+  body.innerHTML = liveBox + summary + `<div class="kpis">
       <div class="kpi"><div class="l">Machines with output</div><div class="v">${ran}</div></div>
       <div class="kpi"><div class="l">Breakdown time</div><div class="v">${hhmm(Math.round(totalBd))}</div></div>
       <div class="kpi"><div class="l">Machines with exceptions</div><div class="v">${allFlags}</div></div>
       <div class="kpi"><div class="l">Period</div><div class="v" style="font-size:18px">${esc(R.label)} · ${oeePeriod}${L ? ' · live' : ''}</div></div></div>
     <div class="tablewrap"><table class="oee"><thead><tr><th class="first">Machine</th>${OEE_COLS.map(c => `<th class="n${c[0] === 'actual_output' ? ' act' : ''}">${hdr(c[1])}</th>`).join('')}<th>Exceptions</th></tr></thead><tbody>${html}</tbody></table></div>
-    <div class="muted small" style="margin-top:8px">Planned output = the planner's figure · Plan adherence = Σ smaller of planned/actual ÷ Σ larger of planned/actual, per product per shift (100% = made exactly what was planned; unplanned production and planned-not-made both count as misses) · Availability = 1 − breakdown h ÷ planned h · After breakdowns = expected output × availability · Efficiency = actual ÷ after breakdowns · Quality = output ÷ (output + sweet scrap + wrapper waste) · OEE = A × E × Q · Utilisation = planned h ÷ ${oeePeriod === '24H' ? 24 : hrs / nDays} h${nDays > 1 ? ` × ${nDays} days` : ''}.
+    <div class="muted small" style="margin-top:8px">Planned output = the planner's figure · Plan adherence = Σ smaller of planned/actual ÷ Σ larger of planned/actual, per product per shift (100% = made exactly what was planned; unplanned production and planned-not-made both count as misses) · Availability = 1 − breakdown h ÷ planned h · Expected output = the machine's own capacity per day (master data) × planned h ÷ 24 (× the product's purchasing factor only for products counted in cartons, to convert to cartons) · After breakdowns = expected output × availability · Efficiency = actual ÷ after breakdowns · Quality = output ÷ (output + sweet scrap + wrapper waste) · OEE = A × E × Q · Utilisation = planned h ÷ ${oeePeriod === '24H' ? 24 : hrs / nDays} h${nDays > 1 ? ` × ${nDays} days` : ''}.
       ${multi ? 'Week and month figures are totals for the period with the ratios worked out from the totals; “×3” = number of shifts with that exception. Weeks run Monday–Sunday.' : ''}
       Figures are worked out per shift first (a breakdown only reduces the target of its own shift), then added up. Group rows are totals of their machines. Actual output is coloured the same as Efficiency. Output is in each machine's own unit (Kg or CTNS).
       Twist wrap and lollipop wrapping machines are grouped by the product they made that day (Tropical / Small / Other; Large / Small lollipop) and use that group's limits – the group of the product with the most output that day, or the most planned hours if nothing has been made yet; “converted” = not the machine's usual group.
@@ -1367,30 +1395,46 @@ function exportOEE() {
   const byProd = [];
   for (const r of S.oeeRows.filter(r => !r.idle)) for (const p of S.oeeProd?.[r.key] || []) {
     const o = { Period: R.label, From: R.from, To: R.to, Shift: oeePeriod, Machine: r.machine_name, Group: r.group_code, Section: r.department,
-      'Product code': p.product_code, Product: p.product_name, 'Expected output': round(p.expected_output, 0) };
+      'Product code': p.product_code, Product: p.product_name, 'Expected output (machine capacity)': round(p.expected_output, 0) };
     OEE_COLS.forEach(([k, l, d]) => { o[xlLabel(l)] = round(p[k], d); });
     o.Exceptions = [p.mnp && 'Made not planned', p.pnm && 'Planned not made', p.over_105pct && '>105%', p.below_low_limit && 'Below limit', p.quality_below_limit && 'Quality below limit'].filter(Boolean).join(', ');
     byProd.push(o);
   }
   const ws = XLSX.utils.json_to_sheet(out), wb = XLSX.utils.book_new();
+  const SM = S.oeeSummary;
+  if (SM?.rows?.length) {
+    const sum = SM.rows.map(({ gk, tot }) => { const o = { Period: R.label, Shift: oeePeriod, Section: gk };
+      OEE_COLS.forEach(([k, l, d]) => { o[xlLabel(l)] = round(tot[k], d); }); return o; });
+    const ck = SM.scrap.cooking, sw = XLSX.utils.json_to_sheet(sum);
+    XLSX.utils.sheet_add_aoa(sw, [[], ['Total Sweet Scrap (kg)', round(SM.scrap.ss, 1), ck > 0 ? Math.round(SM.scrap.ss / ck * 1e6) / 1e6 : null, '% of Cooking'],
+      ['Total Recycling (kg)', round(SM.scrap.recycling, 1), ck > 0 ? Math.round(SM.scrap.recycling / ck * 1e6) / 1e6 : null, '% of Cooking'],
+      ['Cooking output (kg)', round(ck, 1)]], { origin: { r: sum.length + 1, c: 0 } });
+    for (const rr of [sum.length + 2, sum.length + 3]) { const a = XLSX.utils.encode_cell({ r: rr, c: 2 }); if (sw[a] && typeof sw[a].v === 'number') sw[a].z = '0.00%'; }
+    XLSX.utils.book_append_sheet(wb, sw, 'Summary');
+  }
   XLSX.utils.book_append_sheet(wb, ws, 'OEE');
   if (byProd.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(byProd), 'By product');
   XLSX.writeFile(wb, `KSL OEE ${R.file} ${oeePeriod}.xlsx`);
 }
 
 /* =========================================================
-   OUTPUT SUMMARY (Admin, Shift supervisor, Manager)
+   OUTPUT SUMMARY (Admin, Shift supervisor, Manager, Clerk)
    Replaces the "Finished Goods Total Output by" tab of Production Data 2022 V1:
    output kg per section per month or week of one calendar year (Jan–Dec).
    Kg as in the sheet: quantity × product nett weight, or the quantity itself when the
    product has no nett weight. TOTAL = Packaging + White Mint + Manual (finished goods).
    Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap kg, all machines.
    Weeks: Monday–Sunday, cut at 1 Jan and 31 Dec (week 1 = 1 Jan to the first Sunday).
+   Daily (26 Nov 2026): one row per day of a chosen month of the year, with a month total.
    ========================================================= */
 const FG_SECS = ['Cooking', 'Wrapping', 'Packaging', 'White Mint', 'Manual'];
 const FG_FG = ['Packaging', 'White Mint', 'Manual'];
 const FG_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const FG = { year: null, view: 'Month', prods: new Set(), cache: {}, rows: null, firstYear: null, q: '' };
+const FG = { year: null, view: 'Month', month: null, prods: new Set(), cache: {}, rows: null, firstYear: null, q: '' };
+const FG_VIEWS = { Month: 'Monthly', Week: 'Weekly', Day: 'Daily' };
+// months that can be picked in the Daily view: all 12, or up to this month for the current year
+const fgMonths = y => String(y) === kenyaToday().slice(0, 4) ? +kenyaToday().slice(5, 7) : 12;
+const fgDayLabel = d => new Date(d + 'T00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
 const fgKg = o => { const nw = +S.m.productBy[o.product_code]?.nett_weight || 0; const q = +o.qty || 0; return nw > 0 ? q * nw : q; };
 function fgWeek(d) {           // Monday–Sunday week number inside the calendar year, cut at 1 Jan
   const y = d.slice(0, 4), jan1 = utc(y + '-01-01'), off = (jan1.getUTCDay() + 6) % 7;   // 0 = Monday
@@ -1414,20 +1458,24 @@ async function renderFG() {
     if (S.view !== 'fg') return;
   }
   const years = []; for (let y = thisYear; y >= FG.firstYear; y--) years.push(y);
-  $('#app').innerHTML = `<div class="hint">Output in kg per section, by month or week, for one year (January to December), as in the
+  if (!FG.month || FG.month > fgMonths(FG.year)) FG.month = fgMonths(FG.year);
+  $('#app').innerHTML = `<div class="hint">Output in kg per section, by month or week for one year (January to December), or by day for one month, as in the
       "Finished Goods Total Output" sheet. TOTAL = Packaging + White Mint + Manual (finished goods).
       Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap in kg from all machines.</div>
     <div class="toolbar">
       <div class="field"><label for="fgYear">Year</label><select id="fgYear">${years.map(y => `<option ${y === FG.year ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
-      <div class="field"><label for="fgView">View</label><select id="fgView">${['Month', 'Week'].map(v => `<option value="${v}" ${v === FG.view ? 'selected' : ''}>${v === 'Month' ? 'Monthly' : 'Weekly'}</option>`).join('')}</select></div>
+      <div class="field"><label for="fgView">View</label><select id="fgView">${Object.entries(FG_VIEWS).map(([v, l]) => `<option value="${v}" ${v === FG.view ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="field${FG.view === 'Day' ? '' : ' hidden'}" id="fgMonthF"><label for="fgMonth">Month</label><select id="fgMonth"></select></div>
       <div class="field" style="position:relative;min-width:260px"><label for="fgProdBtn">Products</label>
         <button type="button" class="btn" id="fgProdBtn" style="text-align:left;font-weight:500" aria-expanded="false"></button>
         <div id="fgProdBox" class="cbox hidden" style="top:100%;left:0;width:min(92vw,460px);max-height:none;padding:8px"></div></div>
       <button class="btn" id="fgRefresh" type="button">Refresh</button>
       <button class="btn" id="fgExport" type="button">Export to Excel</button>
     </div><div id="fgBody"><div class="muted">Loading…</div></div>`;
-  $('#fgYear').onchange = e => { FG.year = +e.target.value; loadFG(); };
-  $('#fgView').onchange = e => { FG.view = e.target.value; drawFG(); };
+  $('#fgYear').onchange = e => { FG.year = +e.target.value; if (FG.month > fgMonths(FG.year)) FG.month = fgMonths(FG.year); fgMonthOpts(); loadFG(); };
+  $('#fgView').onchange = e => { FG.view = e.target.value; $('#fgMonthF').classList.toggle('hidden', FG.view !== 'Day'); drawFG(); };
+  $('#fgMonth').onchange = e => { FG.month = +e.target.value; drawFG(); };
+  fgMonthOpts();
   $('#fgRefresh').onclick = () => { delete FG.cache[FG.year]; loadFG(); };
   $('#fgExport').onclick = exportFG;
   $('#fgProdBtn').onclick = () => fgProdOpen($('#fgProdBox').classList.contains('hidden'));
@@ -1435,6 +1483,10 @@ async function renderFG() {
   S.leave = () => document.removeEventListener('mousedown', fgOutside);
   fgProdLabel();
   loadFG();
+}
+function fgMonthOpts() {
+  const el = $('#fgMonth'); if (!el) return;
+  el.innerHTML = FG_MON.slice(0, fgMonths(FG.year)).map((m, i) => `<option value="${i + 1}" ${i + 1 === FG.month ? 'selected' : ''}>${m} ${FG.year}</option>`).join('');
 }
 function fgOutside(e) { const box = $('#fgProdBox'); if (box && !box.classList.contains('hidden') && !e.target.closest('#fgProdBox,#fgProdBtn')) fgProdOpen(false); }
 function fgProdLabel() {
@@ -1494,25 +1546,28 @@ async function loadFG() {
 }
 function fgCompute() {
   const y = FG.year, data = FG.cache[y] || [], today = kenyaToday(), sel = FG.prods.size ? FG.prods : null;
-  const W = FG.view === 'Week';
-  // periods: every month / week of the year, up to today for the current year
+  const W = FG.view === 'Week', D = FG.view === 'Day';
+  // periods: every month / week of the year, up to today for the current year; Daily = every day of the chosen month
   const last = String(y) === today.slice(0, 4) ? today : `${y}-12-31`;
   const per = [];
-  if (W) { for (let w = 1; w <= fgWeek(last); w++) { const r = fgWeekRange(y, w); per.push({ key: w, label: `Week ${w}`, ...r }); } }
+  const mm = String(FG.month || 1).padStart(2, '0');
+  if (D) { const end = isoD(new Date(Date.UTC(y, FG.month, 0))), stop = end < last ? end : last;
+    for (let d = `${y}-${mm}-01`; d <= stop; d = addDays(d, 1)) per.push({ key: d, label: fgDayLabel(d), from: d, to: d }); }
+  else if (W) { for (let w = 1; w <= fgWeek(last); w++) { const r = fgWeekRange(y, w); per.push({ key: w, label: `Week ${w}`, ...r }); } }
   else { for (let m = 1; m <= +last.slice(5, 7); m++) { const mm = String(m).padStart(2, '0'), from = `${y}-${mm}-01`;
     per.push({ key: m, label: `${FG_MON[m - 1]}-${String(y).slice(2)}`, from, to: isoD(new Date(Date.UTC(y, m, 0))) }); } }
   const by = Object.fromEntries(per.map(p => [p.key, { ...p, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) }]));
   let used = 0;
   for (const o of data) {
     if (sel && !sel.has(o.product_code)) continue;
-    const r = by[W ? fgWeek(o.prod_date) : +o.prod_date.slice(5, 7)]; if (!r) continue;
+    const r = by[D ? o.prod_date : W ? fgWeek(o.prod_date) : +o.prod_date.slice(5, 7)]; if (!r) continue;
     used++; r.n++;
     const sec = S.m.machineBy[o.machine_code]?.department;
     if (FG_SECS.includes(sec)) r[sec] += fgKg(o);
     r.ss += +o.sweet_scrap_kg || 0; r.ms += +o.material_scrap_kg || 0;
   }
   const rows = per.map(p => { const r = by[p.key]; r.total = FG_FG.reduce((a, s) => a + r[s], 0); r.ssPct = r.Cooking > 0 ? r.ss / r.Cooking : null; return r; });
-  const tot = { label: `Total ${y}`, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) };
+  const tot = { label: D ? `Total ${FG_MON[FG.month - 1]} ${y}` : `Total ${y}`, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) };
   for (const r of rows) { tot.n += r.n; tot.ss += r.ss; tot.ms += r.ms; FG_SECS.forEach(s => tot[s] += r[s]); }
   tot.total = FG_FG.reduce((a, s) => a + tot[s], 0); tot.ssPct = tot.Cooking > 0 ? tot.ss / tot.Cooking : null;
   return { rows, tot, used, all: data.length, last };
@@ -1520,39 +1575,42 @@ function fgCompute() {
 function drawFG() {
   const body = $('#fgBody'); if (!body || !FG.cache[FG.year]) return;
   const R = fgCompute(); FG.rows = R;
-  const W = FG.view === 'Week', y = FG.year;
+  const W = FG.view === 'Week', D = FG.view === 'Day', y = FG.year;
+  const unit = D ? 'day' : W ? 'week' : 'month';
   const kg = v => fmt(v, 0), cell = (r, v) => r.n ? v : '<span class="muted">–</span>';
   const line = (r, cls = '') => `<tr${cls ? ` class="${cls}"` : ''}><td class="first"><b>${esc(r.label)}</b></td>${W ? `<td class="muted small">${r.from ? `${esc(fgShort(r.from))} – ${esc(fgShort(r.to))}` : ''}</td>` : ''}
     ${FG_SECS.map(s => `<td class="n">${cell(r, kg(r[s]))}</td>`).join('')}<td class="n"><b>${cell(r, kg(r.total))}</b></td>
     <td class="n">${cell(r, r.ssPct == null ? '<span class="muted">–</span>' : fmt(r.ssPct * 100, 2) + '%')}</td><td class="n">${cell(r, fmt(r.ms, 1))}</td></tr>`;
   const selTxt = FG.prods.size ? `${FG.prods.size} product${FG.prods.size === 1 ? '' : 's'} selected` : 'All products';
   const current = String(y) === kenyaToday().slice(0, 4);
-  body.innerHTML = `<div class="muted small" style="margin-bottom:8px"><b>${y} · ${W ? 'Weekly' : 'Monthly'} · ${esc(selTxt)}</b> · ${R.used.toLocaleString('en-GB')} output entr${R.used === 1 ? 'y' : 'ies'}${current ? ` · up to today (${esc(niceDate(R.last))}); the current ${W ? 'week' : 'month'} is still in progress` : ''}</div>
-    <div class="tablewrap" style="max-width:1100px"><table id="fgTable"><thead><tr><th class="first">${W ? 'Week' : 'Month'}</th>${W ? '<th>Dates</th>' : ''}
+  const curMonth = D && current && String(FG.month).padStart(2, '0') === kenyaToday().slice(5, 7);
+  body.innerHTML = `<div class="muted small" style="margin-bottom:8px"><b>${D ? `${FG_MON[FG.month - 1]} ${y}` : y} · ${FG_VIEWS[FG.view]} · ${esc(selTxt)}</b> · ${R.used.toLocaleString('en-GB')} output entr${R.used === 1 ? 'y' : 'ies'}${(D ? curMonth : current) ? ` · up to today (${esc(niceDate(R.last))}); the current ${unit} is still in progress` : ''}</div>
+    <div class="tablewrap" style="max-width:1100px"><table id="fgTable"><thead><tr><th class="first">${D ? 'Date' : W ? 'Week' : 'Month'}</th>${W ? '<th>Dates</th>' : ''}
       ${FG_SECS.map(s => `<th class="n">${esc(s)}</th>`).join('')}<th class="n">TOTAL</th><th class="n">Sweet Scrap (%)</th><th class="n">Wrapper Scrap (kg)</th></tr></thead>
     <tbody>${R.rows.map(r => line(r)).join('')}${line(R.tot, 'tot')}</tbody></table></div>
-    <div class="muted small" style="margin-top:8px">All figures in kg (cartons × nett weight). – = nothing posted for that ${W ? 'week' : 'month'}${FG.prods.size ? ' for the selected products' : ''}.
+    <div class="muted small" style="margin-top:8px">All figures in kg (cartons × nett weight). – = nothing posted for that ${unit}${FG.prods.size ? ' for the selected products' : ''}.
       ${FG.prods.size ? 'Each product belongs to one stage, so only the sections that make the selected products have figures. Sweet scrap % = sweet scrap of the selected products ÷ their Cooking kg (– when none of them is cooked). ' : ''}
       ${W ? 'Weeks run Monday to Sunday; week 1 starts on 1 January and the last week ends on 31 December, so those can be shorter than 7 days.' : ''}</div>`;
 }
 function exportFG() {
   const R = FG.rows; if (!R) return toast('Nothing to export');
-  const W = FG.view === 'Week', y = FG.year;
+  const W = FG.view === 'Week', D = FG.view === 'Day', y = FG.year;
+  const vName = FG_VIEWS[FG.view].toLowerCase(), mName = D ? `${FG_MON[FG.month - 1]} ${y}` : '';
   const products = FG.prods.size ? [...FG.prods].map(c => `${c} ${S.m.productBy[c]?.description || ''}`.trim()).join('; ') : 'All products';
-  const toRow = r => { const o = { [W ? 'Week' : 'Month']: r.label };
+  const toRow = r => { const o = D ? { Date: r.from || r.label } : { [W ? 'Week' : 'Month']: r.label };
     if (W) { o.From = r.from || null; o.To = r.to || null; }
     FG_SECS.forEach(s => o[s + ' (kg)'] = r.n ? Math.round(r[s] * 100) / 100 : null);
     o['TOTAL (kg)'] = r.n ? Math.round(r.total * 100) / 100 : null;
     o['Sweet Scrap (%)'] = r.n && r.ssPct != null ? Math.round(r.ssPct * 1e6) / 1e6 : null;
     o['Wrapper Scrap (kg)'] = r.n ? Math.round(r.ms * 100) / 100 : null; return o; };
   const rows = [...R.rows.map(toRow), toRow(R.tot)];
-  const ws = XLSX.utils.aoa_to_sheet([[`KSL output summary ${y} – ${W ? 'weekly' : 'monthly'}`], [`Products: ${products}`], []]);
+  const ws = XLSX.utils.aoa_to_sheet([[`KSL output summary ${D ? mName : y} – ${vName}`], [`Products: ${products}`], []]);
   XLSX.utils.sheet_add_json(ws, rows, { origin: 'A4' });
   const keys = Object.keys(rows[0]), pc = keys.indexOf('Sweet Scrap (%)');
   for (let i = 0; i < rows.length; i++) { const a = XLSX.utils.encode_cell({ r: 4 + i, c: pc }); if (ws[a] && typeof ws[a].v === 'number') ws[a].z = '0.00%'; }
   ws['!cols'] = keys.map((k, i) => ({ wch: i === 0 ? 12 : Math.max(11, k.length + 2) }));
-  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, W ? 'Weekly' : 'Monthly');
-  XLSX.writeFile(wb, `KSL Output summary ${y} ${W ? 'weekly' : 'monthly'}${FG.prods.size ? ' (selected products)' : ''}.xlsx`);
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, FG_VIEWS[FG.view]);
+  XLSX.writeFile(wb, `KSL Output summary ${D ? `${y}-${String(FG.month).padStart(2, '0')}` : y} ${vName}${FG.prods.size ? ' (selected products)' : ''}.xlsx`);
 }
 
 /* =========================================================
@@ -2273,7 +2331,7 @@ function exportPlan() {
 async function renderUsers() {
   $('#app').innerHTML = `<div class="hint"><b>Adding someone:</b> Supabase → Authentication → Users → <b>Add user → Create new user</b>. Type their email and a <b>temporary password</b>, tick <b>Auto Confirm User</b>, and give them the temporary password. They appear here as <b>pending</b> – give them a role and press Save. The first time they log in, the app makes them choose their own password.<br>
     <b>Forgotten password:</b> they press <i>Forgot your password?</i> on the log-in screen and get an email link. If they can't get email, set them a temporary password below.<br>
-    <b>Clerk</b>: Bulk entry and SAP summary; can correct their own entries and Mobile data clerks' entries ·
+    <b>Clerk</b>: Bulk entry, SAP summary, OEE and Output summary (view only); can correct their own entries and Mobile data clerks' entries ·
     <b>Mobile data clerk</b>: Bulk entry only; own entries only ·
     <b>Shift supervisor</b>: Planning (full), OEE (view) ·
     <b>Planner</b>: Planning, OEE, Stoppages · <b>Manager</b>: OEE and Planning, view only · <b>Admin</b>: everything.</div><div id="uBody" class="muted">Loading…</div>`;
