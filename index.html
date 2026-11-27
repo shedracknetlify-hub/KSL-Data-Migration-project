@@ -370,12 +370,13 @@ const CAN = {
   oee: r => ['supervisor', 'planner', 'manager', 'admin', 'clerk'].includes(r),
   stops: r => ['planner', 'admin'].includes(r),
   stores: r => ['supervisor', 'planner', 'admin'].includes(r),
-  fg: r => ['supervisor', 'manager', 'admin', 'clerk'].includes(r),
+  fg: r => ['supervisor', 'manager', 'admin', 'clerk', 'compliance'].includes(r),
+  waste: r => ['compliance', 'admin'].includes(r),     // Compliance posts; Admin views and can delete (18_compliance.sql)
   sap: r => ['clerk', 'admin'].includes(r),
   users: r => r === 'admin',
 };
 const ROLE_LABEL = { pending: 'Pending (no access)', supervisor: 'Shift supervisor', clerk: 'Clerk', mobile_clerk: 'Mobile data clerk',
-  planner: 'Planner', manager: 'Manager', admin: 'Admin' };
+  compliance: 'Compliance', planner: 'Planner', manager: 'Manager', admin: 'Admin' };
 const VIEWS = [
   { id: 'entry', label: 'Shift entry', can: CAN.entry, render: renderEntry },
   { id: 'bulk', label: 'Bulk entry', can: CAN.bulk, render: renderBulk },
@@ -383,6 +384,7 @@ const VIEWS = [
   { id: 'plan', label: 'Planning', can: CAN.planView, render: renderPlan },
   { id: 'stores', label: 'Stores issue', can: CAN.stores, render: renderStores },
   { id: 'oee', label: 'OEE', can: CAN.oee, render: renderOEE },
+  { id: 'waste', label: 'Waste & Utilities', can: CAN.waste, render: renderWaste },
   { id: 'fg', label: 'Output summary', can: CAN.fg, render: renderFG },
   { id: 'stops', label: 'Stoppages', can: CAN.stops, render: renderStops },
   { id: 'users', label: 'Users', can: CAN.users, render: renderUsers },
@@ -1418,7 +1420,7 @@ function exportOEE() {
 }
 
 /* =========================================================
-   OUTPUT SUMMARY (Admin, Shift supervisor, Manager, Clerk)
+   OUTPUT SUMMARY (Admin, Shift supervisor, Manager, Clerk, Compliance)
    Replaces the "Finished Goods Total Output by" tab of Production Data 2022 V1:
    output kg per section per month or week of one calendar year (Jan–Dec).
    Kg as in the sheet: quantity × product nett weight, or the quantity itself when the
@@ -1426,11 +1428,27 @@ function exportOEE() {
    Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap kg, all machines.
    Weeks: Monday–Sunday, cut at 1 Jan and 31 Dec (week 1 = 1 Jan to the first Sunday).
    Daily (26 Nov 2026): one row per day of a chosen month of the year, with a month total.
+   Utilities (27 Nov 2026), on the right, from the Compliance figures (utility_readings, Waste & Utilities screen):
+   Electricity usage kWh = Electricity + Solar, Borehole Water L, Firewood t (posted in kg ÷ 1,000). One switch shows them
+   per tonne instead: kWh and L per tonne of finished goods (TOTAL), firewood tonnes per tonne cooked (Cooking).
+   Blank when products are selected. Years go back to the first utility figure (Mar 2023).
    ========================================================= */
 const FG_SECS = ['Cooking', 'Wrapping', 'Packaging', 'White Mint', 'Manual'];
 const FG_FG = ['Packaging', 'White Mint', 'Manual'];
 const FG_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const FG = { year: null, view: 'Month', month: null, prods: new Set(), cache: {}, rows: null, firstYear: null, q: '' };
+const FG = { year: null, view: 'Month', month: null, prods: new Set(), cache: {}, ucache: {}, rows: null, firstYear: null, q: '', utilPer: false };
+// Utilities columns. items = utility_items codes added together; f = factor on the posted figure; base = per-tonne divisor
+const FG_UTIL = [
+  { k: 'elec', l: 'Electricity Usage (kWh)', per: 'Electricity (kWh/t FG)', items: ['ELECTRICITY', 'SOLAR'], f: 1, base: 'total', dp: 0, pdp: 1 },
+  { k: 'bore', l: 'Borehole (L)', per: 'Borehole (L/t FG)', items: ['BOREHOLE-WATER'], f: 1, base: 'total', dp: 0, pdp: 1 },
+  { k: 'fw', l: 'Firewood (Tonnes)', per: 'Firewood (t/t cooked)', items: ['FIREWOOD'], f: 1 / 1000, base: 'Cooking', dp: 2, pdp: 3 },
+];
+const FG_UTIL_BY = Object.fromEntries(FG_UTIL.flatMap(u => u.items.map(c => [c, u])));
+function fgUtilVal(r, u, per) {      // null = nothing to show
+  if (!r.un[u.k]) return null;
+  if (!per) return r.u[u.k];
+  const t = r[u.base] / 1000; return t > 0 ? r.u[u.k] / t : null;
+}
 const FG_VIEWS = { Month: 'Monthly', Week: 'Weekly', Day: 'Daily' };
 // months that can be picked in the Daily view: all 12, or up to this month for the current year
 const fgMonths = y => String(y) === kenyaToday().slice(0, 4) ? +kenyaToday().slice(5, 7) : 12;
@@ -1452,16 +1470,20 @@ async function renderFG() {
   const thisYear = +kenyaToday().slice(0, 4);
   if (!FG.year) FG.year = thisYear;
   if (FG.firstYear == null) {
-    const { data, error } = await sb.from('output_entries').select('prod_date').order('prod_date').limit(1);
-    if (error) fail(error, 'Finding the first year');
-    FG.firstYear = Math.min(thisYear, data?.[0] ? +data[0].prod_date.slice(0, 4) : thisYear);
+    const [a, b] = await Promise.all([sb.from('output_entries').select('prod_date').order('prod_date').limit(1),
+      sb.from('utility_readings').select('reading_date').order('reading_date').limit(1)]);
+    if (a.error) fail(a.error, 'Finding the first year');
+    FG.firstYear = Math.min(thisYear, a.data?.[0] ? +a.data[0].prod_date.slice(0, 4) : thisYear,
+      b.data?.[0] ? +b.data[0].reading_date.slice(0, 4) : thisYear);
     if (S.view !== 'fg') return;
   }
   const years = []; for (let y = thisYear; y >= FG.firstYear; y--) years.push(y);
   if (!FG.month || FG.month > fgMonths(FG.year)) FG.month = fgMonths(FG.year);
   $('#app').innerHTML = `<div class="hint">Output in kg per section, by month or week for one year (January to December), or by day for one month, as in the
       "Finished Goods Total Output" sheet. TOTAL = Packaging + White Mint + Manual (finished goods).
-      Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap in kg from all machines.</div>
+      Sweet scrap % = sweet scrap from all machines ÷ Cooking kg. Wrapper scrap = material scrap in kg from all machines.
+      Utilities come from the Waste &amp; Utilities figures: Electricity usage = Electricity + Solar (kWh); Borehole water in litres; Firewood in tonnes.
+      Tick <b>Utilities per tonne</b> for kWh and litres per tonne of finished goods (TOTAL) and firewood tonnes per tonne cooked (Cooking).</div>
     <div class="toolbar">
       <div class="field"><label for="fgYear">Year</label><select id="fgYear">${years.map(y => `<option ${y === FG.year ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
       <div class="field"><label for="fgView">View</label><select id="fgView">${Object.entries(FG_VIEWS).map(([v, l]) => `<option value="${v}" ${v === FG.view ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
@@ -1469,14 +1491,17 @@ async function renderFG() {
       <div class="field" style="position:relative;min-width:260px"><label for="fgProdBtn">Products</label>
         <button type="button" class="btn" id="fgProdBtn" style="text-align:left;font-weight:500" aria-expanded="false"></button>
         <div id="fgProdBox" class="cbox hidden" style="top:100%;left:0;width:min(92vw,460px);max-height:none;padding:8px"></div></div>
+      <label class="small" style="display:flex;gap:6px;align-items:center;align-self:flex-end;min-height:40px;text-transform:none;letter-spacing:normal;font-weight:500;color:var(--ink);cursor:pointer">
+        <input type="checkbox" id="fgUtilPer" style="width:auto;min-height:0" ${FG.utilPer ? 'checked' : ''}> Utilities per tonne</label>
       <button class="btn" id="fgRefresh" type="button">Refresh</button>
       <button class="btn" id="fgExport" type="button">Export to Excel</button>
     </div><div id="fgBody"><div class="muted">Loading…</div></div>`;
   $('#fgYear').onchange = e => { FG.year = +e.target.value; if (FG.month > fgMonths(FG.year)) FG.month = fgMonths(FG.year); fgMonthOpts(); loadFG(); };
   $('#fgView').onchange = e => { FG.view = e.target.value; $('#fgMonthF').classList.toggle('hidden', FG.view !== 'Day'); drawFG(); };
   $('#fgMonth').onchange = e => { FG.month = +e.target.value; drawFG(); };
+  $('#fgUtilPer').onchange = e => { FG.utilPer = e.target.checked; drawFG(); };
   fgMonthOpts();
-  $('#fgRefresh').onclick = () => { delete FG.cache[FG.year]; loadFG(); };
+  $('#fgRefresh').onclick = () => { delete FG.cache[FG.year]; delete FG.ucache[FG.year]; loadFG(); };
   $('#fgExport').onclick = exportFG;
   $('#fgProdBtn').onclick = () => fgProdOpen($('#fgProdBox').classList.contains('hidden'));
   document.addEventListener('mousedown', fgOutside);
@@ -1533,11 +1558,15 @@ function fgProdChanged(keepList) { fgProdLabel(); if (!keepList) fgProdItems(); 
 async function loadFG() {
   const body = $('#fgBody'); if (!body) return;
   const y = FG.year;
-  if (!FG.cache[y]) {
+  if (!FG.cache[y] || !FG.ucache[y]) {
     body.innerHTML = `<div class="muted">Loading ${y}…</div>`;
     try {
-      FG.cache[y] = await fetchAll(() => sb.from('output_entries').select('prod_date,machine_code,product_code,qty,unit,sweet_scrap_kg,material_scrap_kg')
-        .gte('prod_date', `${y}-01-01`).lte('prod_date', `${y}-12-31`).order('id'));
+      const [o, u] = await Promise.all([
+        FG.cache[y] || fetchAll(() => sb.from('output_entries').select('prod_date,machine_code,product_code,qty,unit,sweet_scrap_kg,material_scrap_kg')
+          .gte('prod_date', `${y}-01-01`).lte('prod_date', `${y}-12-31`).order('id')),
+        FG.ucache[y] || fetchAll(() => sb.from('utility_readings').select('reading_date,item_code,qty')
+          .in('item_code', Object.keys(FG_UTIL_BY)).gte('reading_date', `${y}-01-01`).lte('reading_date', `${y}-12-31`).order('id'))]);
+      FG.cache[y] = o; FG.ucache[y] = u;
     } catch (e) { body.innerHTML = ''; return fail(e, 'Loading output'); }
     if (S.view !== 'fg' || FG.year !== y || $('#fgBody') !== body) return;
   }
@@ -1556,7 +1585,8 @@ function fgCompute() {
   else if (W) { for (let w = 1; w <= fgWeek(last); w++) { const r = fgWeekRange(y, w); per.push({ key: w, label: `Week ${w}`, ...r }); } }
   else { for (let m = 1; m <= +last.slice(5, 7); m++) { const mm = String(m).padStart(2, '0'), from = `${y}-${mm}-01`;
     per.push({ key: m, label: `${FG_MON[m - 1]}-${String(y).slice(2)}`, from, to: isoD(new Date(Date.UTC(y, m, 0))) }); } }
-  const by = Object.fromEntries(per.map(p => [p.key, { ...p, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) }]));
+  const zu = () => Object.fromEntries(FG_UTIL.map(u => [u.k, 0]));
+  const by = Object.fromEntries(per.map(p => [p.key, { ...p, n: 0, ss: 0, ms: 0, u: zu(), un: zu(), ...Object.fromEntries(FG_SECS.map(s => [s, 0])) }]));
   let used = 0;
   for (const o of data) {
     if (sel && !sel.has(o.product_code)) continue;
@@ -1566,30 +1596,40 @@ function fgCompute() {
     if (FG_SECS.includes(sec)) r[sec] += fgKg(o);
     r.ss += +o.sweet_scrap_kg || 0; r.ms += +o.material_scrap_kg || 0;
   }
+  for (const o of FG.ucache[y] || []) {          // utilities (whole plant, not per product)
+    const u = FG_UTIL_BY[o.item_code], r = by[D ? o.reading_date : W ? fgWeek(o.reading_date) : +o.reading_date.slice(5, 7)];
+    if (u && r) { r.u[u.k] += (+o.qty || 0) * u.f; r.un[u.k]++; }
+  }
   const rows = per.map(p => { const r = by[p.key]; r.total = FG_FG.reduce((a, s) => a + r[s], 0); r.ssPct = r.Cooking > 0 ? r.ss / r.Cooking : null; return r; });
-  const tot = { label: D ? `Total ${FG_MON[FG.month - 1]} ${y}` : `Total ${y}`, n: 0, ss: 0, ms: 0, ...Object.fromEntries(FG_SECS.map(s => [s, 0])) };
-  for (const r of rows) { tot.n += r.n; tot.ss += r.ss; tot.ms += r.ms; FG_SECS.forEach(s => tot[s] += r[s]); }
+  const tot = { label: D ? `Total ${FG_MON[FG.month - 1]} ${y}` : `Total ${y}`, n: 0, ss: 0, ms: 0, u: zu(), un: zu(), ...Object.fromEntries(FG_SECS.map(s => [s, 0])) };
+  for (const r of rows) { tot.n += r.n; tot.ss += r.ss; tot.ms += r.ms; FG_SECS.forEach(s => tot[s] += r[s]);
+    FG_UTIL.forEach(u => { tot.u[u.k] += r.u[u.k]; tot.un[u.k] += r.un[u.k]; }); }
   tot.total = FG_FG.reduce((a, s) => a + tot[s], 0); tot.ssPct = tot.Cooking > 0 ? tot.ss / tot.Cooking : null;
   return { rows, tot, used, all: data.length, last };
 }
 function drawFG() {
-  const body = $('#fgBody'); if (!body || !FG.cache[FG.year]) return;
+  const body = $('#fgBody'); if (!body || !FG.cache[FG.year] || !FG.ucache[FG.year]) return;
   const R = fgCompute(); FG.rows = R;
   const W = FG.view === 'Week', D = FG.view === 'Day', y = FG.year;
   const unit = D ? 'day' : W ? 'week' : 'month';
   const kg = v => fmt(v, 0), cell = (r, v) => r.n ? v : '<span class="muted">–</span>';
   const line = (r, cls = '') => `<tr${cls ? ` class="${cls}"` : ''}><td class="first"><b>${esc(r.label)}</b></td>${W ? `<td class="muted small">${r.from ? `${esc(fgShort(r.from))} – ${esc(fgShort(r.to))}` : ''}</td>` : ''}
     ${FG_SECS.map(s => `<td class="n">${cell(r, kg(r[s]))}</td>`).join('')}<td class="n"><b>${cell(r, kg(r.total))}</b></td>
-    <td class="n">${cell(r, r.ssPct == null ? '<span class="muted">–</span>' : fmt(r.ssPct * 100, 2) + '%')}</td><td class="n">${cell(r, fmt(r.ms, 1))}</td></tr>`;
+    <td class="n">${cell(r, r.ssPct == null ? '<span class="muted">–</span>' : fmt(r.ssPct * 100, 2) + '%')}</td><td class="n">${cell(r, fmt(r.ms, 1))}</td>
+    ${FG_UTIL.map((u, i) => `<td class="n"${i ? '' : ' style="border-left:2px solid var(--line)"'}>${FG.prods.size ? '' : (v => v == null ? '<span class="muted">–</span>' : fmt(v, FG.utilPer ? u.pdp : u.dp))(fgUtilVal(r, u, FG.utilPer))}</td>`).join('')}</tr>`;
   const selTxt = FG.prods.size ? `${FG.prods.size} product${FG.prods.size === 1 ? '' : 's'} selected` : 'All products';
   const current = String(y) === kenyaToday().slice(0, 4);
   const curMonth = D && current && String(FG.month).padStart(2, '0') === kenyaToday().slice(5, 7);
   body.innerHTML = `<div class="muted small" style="margin-bottom:8px"><b>${D ? `${FG_MON[FG.month - 1]} ${y}` : y} · ${FG_VIEWS[FG.view]} · ${esc(selTxt)}</b> · ${R.used.toLocaleString('en-GB')} output entr${R.used === 1 ? 'y' : 'ies'}${(D ? curMonth : current) ? ` · up to today (${esc(niceDate(R.last))}); the current ${unit} is still in progress` : ''}</div>
-    <div class="tablewrap" style="max-width:1100px"><table id="fgTable"><thead><tr><th class="first">${D ? 'Date' : W ? 'Week' : 'Month'}</th>${W ? '<th>Dates</th>' : ''}
-      ${FG_SECS.map(s => `<th class="n">${esc(s)}</th>`).join('')}<th class="n">TOTAL</th><th class="n">Sweet Scrap (%)</th><th class="n">Wrapper Scrap (kg)</th></tr></thead>
+    <div class="tablewrap" style="max-width:1600px"><table id="fgTable"><thead>
+      <tr><th colspan="${W ? 10 : 9}" style="border-bottom:0"></th><th colspan="3" class="n" style="text-align:center;border-left:2px solid var(--line)">Utilities${FG.utilPer ? ' (per tonne)' : ''}</th></tr>
+      <tr><th class="first">${D ? 'Date' : W ? 'Week' : 'Month'}</th>${W ? '<th>Dates</th>' : ''}
+      ${FG_SECS.map(s => `<th class="n">${esc(s)}</th>`).join('')}<th class="n">TOTAL</th><th class="n">Sweet Scrap (%)</th><th class="n">Wrapper Scrap (kg)</th>
+      ${FG_UTIL.map((u, i) => `<th class="n"${i ? '' : ' style="border-left:2px solid var(--line)"'}>${esc(FG.utilPer ? u.per : u.l)}</th>`).join('')}</tr></thead>
     <tbody>${R.rows.map(r => line(r)).join('')}${line(R.tot, 'tot')}</tbody></table></div>
     <div class="muted small" style="margin-top:8px">All figures in kg (cartons × nett weight). – = nothing posted for that ${unit}${FG.prods.size ? ' for the selected products' : ''}.
       ${FG.prods.size ? 'Each product belongs to one stage, so only the sections that make the selected products have figures. Sweet scrap % = sweet scrap of the selected products ÷ their Cooking kg (– when none of them is cooked). ' : ''}
+      Utilities: ${FG.prods.size ? 'left blank while products are selected (utilities are not tied to products). ' : `from the Waste &amp; Utilities figures; Electricity usage = Electricity + Solar; Firewood posted in kg, shown in tonnes${FG.utilPer ? '; per tonne = kWh or litres per tonne of finished goods (TOTAL), and firewood tonnes per tonne cooked (Cooking); – when nothing was posted or the TOTAL / Cooking is 0' : ''}. `}
       ${W ? 'Weeks run Monday to Sunday; week 1 starts on 1 January and the last week ends on 31 December, so those can be shorter than 7 days.' : ''}</div>`;
 }
 function exportFG() {
@@ -1602,15 +1642,132 @@ function exportFG() {
     FG_SECS.forEach(s => o[s + ' (kg)'] = r.n ? Math.round(r[s] * 100) / 100 : null);
     o['TOTAL (kg)'] = r.n ? Math.round(r.total * 100) / 100 : null;
     o['Sweet Scrap (%)'] = r.n && r.ssPct != null ? Math.round(r.ssPct * 1e6) / 1e6 : null;
-    o['Wrapper Scrap (kg)'] = r.n ? Math.round(r.ms * 100) / 100 : null; return o; };
+    o['Wrapper Scrap (kg)'] = r.n ? Math.round(r.ms * 100) / 100 : null;
+    FG_UTIL.forEach(u => { const v = FG.prods.size ? null : fgUtilVal(r, u, FG.utilPer);
+      o[FG.utilPer ? u.per : u.l] = v == null ? null : Math.round(v * 1e4) / 1e4; });
+    return o; };
   const rows = [...R.rows.map(toRow), toRow(R.tot)];
-  const ws = XLSX.utils.aoa_to_sheet([[`KSL output summary ${D ? mName : y} – ${vName}`], [`Products: ${products}`], []]);
+  const ws = XLSX.utils.aoa_to_sheet([[`KSL output summary ${D ? mName : y} – ${vName}`], [`Products: ${products}`],
+    [FG.prods.size ? 'Utilities: blank (products selected)' : FG.utilPer ? 'Utilities per tonne: kWh and L per tonne of finished goods (TOTAL); firewood t per t cooked (Cooking). Electricity = Electricity + Solar.'
+      : 'Utilities: Electricity = Electricity + Solar (kWh); Borehole water L; Firewood tonnes.']]);
   XLSX.utils.sheet_add_json(ws, rows, { origin: 'A4' });
   const keys = Object.keys(rows[0]), pc = keys.indexOf('Sweet Scrap (%)');
   for (let i = 0; i < rows.length; i++) { const a = XLSX.utils.encode_cell({ r: 4 + i, c: pc }); if (ws[a] && typeof ws[a].v === 'number') ws[a].z = '0.00%'; }
   ws['!cols'] = keys.map((k, i) => ({ wch: i === 0 ? 12 : Math.max(11, k.length + 2) }));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, FG_VIEWS[FG.view]);
   XLSX.writeFile(wb, `KSL Output summary ${D ? `${y}-${String(FG.month).padStart(2, '0')}` : y} ${vName}${FG.prods.size ? ' (selected products)' : ''}.xlsx`);
+}
+
+/* =========================================================
+   WASTE & UTILITIES (Compliance posts, Admin views + deletes) – 27 Nov 2026
+   One figure per item per DAY (no shift), as in the "Internal Waste & Utilities" sheet
+   (Compliance Summary). Table utility_readings, items in utility_items (18_compliance.sql).
+   Compliance adds figures and corrects / deletes only their own; history from the sheet and
+   other people's figures are locked. Admin cannot add or change, only delete.
+   The Output summary Utilities columns and the Daily OEE email read these figures.
+   ========================================================= */
+const WU = { date: null, items: null };
+const yesterday = () => addDays(kenyaToday(), -1);
+async function renderWaste() {
+  if (!WU.date) WU.date = yesterday();
+  const comp = S.profile.role === 'compliance';
+  if (!WU.items) {
+    const { data, error } = await sb.from('utility_items').select('*').eq('active', true).order('sort_order');
+    if (error) { $('#app').innerHTML = ''; return fail(error, 'Loading the waste & utility items (has 18_compliance.sql been run?)'); }
+    WU.items = data;
+    if (S.view !== 'waste') return;
+  }
+  $('#app').innerHTML = `<div class="hint">${comp
+      ? `Daily figures for internal waste and utilities, as in the <b>Internal Waste &amp; Utilities</b> sheet: pick the <b>date</b> (no shift – one figure per item for the whole day),
+         type the figures you have and press <b>Save</b>. Leave an item empty if there is no figure. You can correct or delete only figures you entered yourself;
+         figures from the old sheet are <b>locked</b> (ask Admin to delete one if it is wrong).`
+      : `Figures posted by Compliance users (one per item per day). Admin can view and delete figures here, but not add or change them.`}
+      Electricity + Solar, Borehole Water and Firewood feed the Utilities columns of the Output summary and the Daily OEE email.</div>
+    <div class="toolbar">
+      <div class="field"><label for="wuDate">Date</label><input id="wuDate" type="date" value="${WU.date}" max="${kenyaToday()}"></div>
+      <button class="btn" id="wuPrev" type="button" title="Previous day">◀ Day</button><button class="btn" id="wuNext" type="button" title="Next day">Day ▶</button>
+      ${comp ? '<button class="btn primary" id="wuSave" type="button">Save</button>' : ''}
+    </div>
+    <div id="wuErrs" class="gerrs hidden"></div><div id="wuBody"><div class="muted">Loading…</div></div>
+    <h3 style="margin:22px 0 10px">Last 14 days</h3><div id="wuRecent" class="muted">Loading…</div>`;
+  const go = d => { if (!d || d > kenyaToday()) return; WU.date = d; $('#wuDate').value = d; loadWaste(); };
+  $('#wuDate').onchange = e => go(e.target.value);
+  $('#wuPrev').onclick = () => go(addDays(WU.date, -1));
+  $('#wuNext').onclick = () => go(addDays(WU.date, 1));
+  if (comp) $('#wuSave').onclick = saveWaste;
+  loadWaste();
+}
+async function loadWaste() {
+  const body = $('#wuBody'); if (!body) return;
+  const d = WU.date, comp = S.profile.role === 'compliance', admin = S.profile.role === 'admin';
+  $('#wuErrs').classList.add('hidden');
+  const from = addDays(d, -13);
+  const { data, error } = await sb.from('utility_readings').select('*').gte('reading_date', from).lte('reading_date', d).order('reading_date');
+  if (error) { body.innerHTML = ''; return fail(error, 'Loading figures'); }
+  if (WU.date !== d || $('#wuBody') !== body) return;
+  if (admin) await loadUserNames(data.map(r => r.entered_by));
+  const day = Object.fromEntries(data.filter(r => r.reading_date === d).map(r => [r.item_code, r]));
+  WU.day = day;
+  const mine = r => r && r.entered_by === S.user.id;
+  const who = r => !r ? '' : r.source !== 'app' ? '<span class="muted small">old sheet</span>'
+    : admin ? `<span class="small">${esc(S.userNames[r.entered_by] || 'unknown user')}</span> <span class="muted small">${esc(kenyaStamp(r.entered_at))}</span>`
+    : mine(r) ? '<span class="small">you</span>' : '<span class="muted small">another user</span>';
+  const act = r => !r ? '' : (admin || (comp && mine(r))) ? `<button class="x" data-id="${r.id}" title="Delete this figure">×</button>`
+    : '<span class="muted small" title="Entered by someone else or from the old sheet – you can\'t change it">locked</span>';
+  body.innerHTML = `<div class="tablewrap" style="max-width:900px"><table id="wuTable"><thead><tr><th class="first">Item</th><th>Unit</th><th class="n">Figure</th><th>Comments</th><th>Entered by</th><th></th></tr></thead><tbody>
+    ${WU.items.map(it => { const r = day[it.code], edit = comp && (!r || mine(r));
+      return `<tr data-c="${esc(it.code)}"><td class="first"><b>${esc(it.name)}</b></td><td>${esc(it.unit)}</td>
+        <td class="n" style="min-width:130px">${edit ? `<input class="wu-q" inputmode="decimal" autocomplete="off" style="text-align:right" value="${r ? esc(String(+r.qty)) : ''}">` : r ? fmt(+r.qty, +r.qty % 1 ? 2 : 0) : '<span class="muted">–</span>'}</td>
+        <td style="min-width:180px">${edit ? `<input class="wu-cm" autocomplete="off" value="${esc(r?.comments || '')}">` : esc(r?.comments || '')}</td>
+        <td>${who(r)}</td><td>${act(r)}</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <div class="muted small" style="margin-top:6px">${esc(niceDate(d))} · ${Object.keys(day).length} of ${WU.items.length} items have a figure.${comp ? ' Press × twice to delete one of your figures.' : admin ? ' Press × twice to delete a figure.' : ''}</div>`;
+  $$('#wuTable button.x').forEach(b => b.onclick = async () => {
+    if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Delete?'; b.style.fontSize = '12px'; setTimeout(() => { b.dataset.confirm = ''; b.textContent = '×'; b.style.fontSize = ''; }, 3000); return; }
+    const { data: del, error } = await sb.from('utility_readings').delete().eq('id', b.dataset.id).select('id');
+    if (error) return fail(error, 'Delete');
+    if (!del?.length) return toast('Not deleted – you can only delete your own figures', 'err');
+    toast('Deleted'); loadWaste();
+  });
+  // last 14 days overview: dates down, items across; click a date to open it
+  const days = []; for (let x = d; x >= from; x = addDays(x, -1)) days.push(x);
+  const grid = {}; data.forEach(r => (grid[r.reading_date] ||= {})[r.item_code] = r);
+  $('#wuRecent').innerHTML = `<div class="tablewrap"><table><thead><tr><th class="first">Date</th>${WU.items.map(it => `<th class="n" style="white-space:nowrap" title="${esc(it.name)} (${esc(it.unit)})">${esc(it.name)}<br><span class="muted">${esc(it.unit)}</span></th>`).join('')}</tr></thead><tbody>
+    ${days.map(x => `<tr><td class="first"><a href="#waste" data-d="${x}">${esc(fgDayLabel(x))}</a></td>${WU.items.map(it => { const r = grid[x]?.[it.code];
+      return `<td class="n">${r ? fmt(+r.qty, +r.qty % 1 ? 2 : 0) : '<span class="muted">–</span>'}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div>`;
+  $$('#wuRecent a[data-d]').forEach(a => a.onclick = e => { e.preventDefault(); WU.date = a.dataset.d; $('#wuDate').value = WU.date; loadWaste(); window.scrollTo(0, 0); });
+}
+async function saveWaste() {
+  const d = WU.date, day = WU.day || {}, errs = [], ins = [], upd = [];
+  $$('#wuTable tbody tr').forEach(tr => {
+    const q = $('.wu-q', tr); if (!q) return;
+    const code = tr.dataset.c, it = WU.items.find(i => i.code === code), r = day[code];
+    const raw = q.value.trim().replace(/,/g, ''), cm = $('.wu-cm', tr).value.trim() || null;
+    q.parentElement.classList.remove('bad');
+    if (raw === '') {
+      if (r) { errs.push(`${it.name}: to remove a figure press × instead of clearing it`); q.parentElement.classList.add('bad'); }
+      else if (cm) { errs.push(`${it.name}: a comment needs a figure`); q.parentElement.classList.add('bad'); }
+      return;
+    }
+    const v = Number(raw);
+    if (!isFinite(v) || v < 0) { errs.push(`${it.name}: "${q.value}" is not a number of 0 or more`); q.parentElement.classList.add('bad'); return; }
+    if (!r) ins.push({ reading_date: d, item_code: code, qty: v, comments: cm, entered_by: S.user.id });
+    else if (+r.qty !== v || (r.comments || null) !== cm) upd.push({ id: r.id, qty: v, comments: cm });
+  });
+  const box = $('#wuErrs');
+  if (errs.length) { box.innerHTML = errs.map(esc).join('<br>'); box.classList.remove('hidden'); return; }
+  box.classList.add('hidden');
+  if (!ins.length && !upd.length) return toast('Nothing to save');
+  const btn = $('#wuSave'); btn.disabled = true;
+  try {
+    if (ins.length) { const { error } = await sb.from('utility_readings').insert(ins); if (error) throw error; }
+    for (const u of upd) { const { error } = await sb.from('utility_readings').update({ qty: u.qty, comments: u.comments }).eq('id', u.id); if (error) throw error; }
+    toast(`Saved ${ins.length + upd.length} figure(s) for ${niceDate(d)}`, 'ok');
+    delete FG.ucache[d.slice(0, 4)];          // Output summary picks up the new figures
+  } catch (e) {
+    fail(e, e.code === '23505' ? 'Save (someone else has just posted a figure for this item and day – reload)' : 'Save');
+  } finally { btn.disabled = false; }
+  if (S.view === 'waste') loadWaste();
 }
 
 /* =========================================================
@@ -2333,11 +2490,12 @@ async function renderUsers() {
     <b>Forgotten password:</b> they press <i>Forgot your password?</i> on the log-in screen and get an email link. If they can't get email, set them a temporary password below.<br>
     <b>Clerk</b>: Bulk entry, SAP summary, OEE and Output summary (view only); can correct their own entries and Mobile data clerks' entries ·
     <b>Mobile data clerk</b>: Bulk entry only; own entries only ·
+    <b>Compliance</b>: Waste &amp; Utilities (daily figures, the only role that can post them; own figures only) and Output summary (view) ·
     <b>Shift supervisor</b>: Planning (full), OEE (view) ·
-    <b>Planner</b>: Planning, OEE, Stoppages · <b>Manager</b>: OEE and Planning, view only · <b>Admin</b>: everything.</div><div id="uBody" class="muted">Loading…</div>`;
+    <b>Planner</b>: Planning, OEE, Stoppages · <b>Manager</b>: OEE and Planning, view only · <b>Admin</b>: everything (Waste &amp; Utilities: view and delete only).</div><div id="uBody" class="muted">Loading…</div>`;
   const { data, error } = await sb.from('profiles').select('*').order('created_at');
   if (error) return fail(error, 'Loading users');
-  const roles = ['pending', 'clerk', 'mobile_clerk', 'supervisor', 'planner', 'manager', 'admin'];
+  const roles = ['pending', 'clerk', 'mobile_clerk', 'compliance', 'supervisor', 'planner', 'manager', 'admin'];
   const hasPw = data.some(u => 'password_set' in u);      // false until 11_passwords.sql is run
   $('#uBody').className = '';
   $('#uBody').innerHTML = `<div class="tablewrap"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Active</th>${hasPw ? '<th>Password</th>' : ''}<th></th></tr></thead><tbody>
